@@ -33,6 +33,12 @@ class WorkOrderType(StrEnum):
     UNPLANNED = "unplanned"
 
 
+class AiVerdict(StrEnum):
+    ACCEPTED = "accepted"
+    ACCEPTED_WITH_COMMENTS = "accepted_with_comments"
+    REWORK = "rework"
+
+
 ALLOWED_TRANSITIONS: dict[WorkOrderStatus, frozenset[WorkOrderStatus]] = {
     WorkOrderStatus.ISSUED: frozenset({WorkOrderStatus.ACCEPTED, WorkOrderStatus.QUEUED, WorkOrderStatus.REJECTED}),
     WorkOrderStatus.ACCEPTED: frozenset({WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.QUEUED}),

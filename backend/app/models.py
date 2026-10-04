@@ -1,10 +1,12 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String, Text, func
+from decimal import Decimal
+
+from sqlalchemy import JSON, Boolean, DateTime, Enum, ForeignKey, Numeric, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
-from app.domain import UserRole, WorkOrderPriority, WorkOrderStatus, WorkOrderType
+from app.domain import AiVerdict, UserRole, WorkOrderPriority, WorkOrderStatus, WorkOrderType
 
 
 def enum_values(enum):
@@ -63,3 +65,72 @@ class WorkOrderEvent(Base):
     comment: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     work_order: Mapped[WorkOrder] = relationship(back_populates="events")
+
+
+class FaultCode(Base):
+    __tablename__ = "fault_codes"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(30), unique=True)
+    name: Mapped[str] = mapped_column(String(200))
+
+
+class Material(Base):
+    __tablename__ = "materials"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    unit: Mapped[str] = mapped_column(String(30))
+
+
+class WorkOrderCompletion(Base):
+    __tablename__ = "work_order_completions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    work_order_id: Mapped[int] = mapped_column(ForeignKey("work_orders.id", ondelete="CASCADE"), unique=True)
+    fault_code_id: Mapped[int] = mapped_column(ForeignKey("fault_codes.id"))
+    work_performed: Mapped[str] = mapped_column(Text)
+    comment: Mapped[str | None] = mapped_column(Text)
+    completed_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MaterialUsage(Base):
+    __tablename__ = "material_usages"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    completion_id: Mapped[int] = mapped_column(ForeignKey("work_order_completions.id", ondelete="CASCADE"))
+    material_id: Mapped[int] = mapped_column(ForeignKey("materials.id"))
+    quantity: Mapped[Decimal] = mapped_column(Numeric(12, 3))
+
+
+class WorkOrderPhoto(Base):
+    __tablename__ = "work_order_photos"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    work_order_id: Mapped[int] = mapped_column(ForeignKey("work_orders.id", ondelete="CASCADE"))
+    photo_type: Mapped[str] = mapped_column(String(20))
+    file_path: Mapped[str] = mapped_column(String(500))
+    original_name: Mapped[str | None] = mapped_column(String(255))
+    content_type: Mapped[str] = mapped_column(String(100))
+    uploaded_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AiInspection(Base):
+    __tablename__ = "ai_inspections"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    work_order_id: Mapped[int] = mapped_column(ForeignKey("work_orders.id", ondelete="CASCADE"), unique=True)
+    verdict: Mapped[AiVerdict] = mapped_column(Enum(AiVerdict, name="ai_verdict", values_callable=enum_values))
+    score: Mapped[int]
+    confidence: Mapped[Decimal] = mapped_column(Numeric(4, 3))
+    checks: Mapped[list[dict]] = mapped_column(JSON)
+    explanation: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    work_order_id: Mapped[int] = mapped_column(ForeignKey("work_orders.id", ondelete="CASCADE"))
+    recipient_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(40))
+    title: Mapped[str] = mapped_column(String(200))
+    message: Mapped[str] = mapped_column(Text)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

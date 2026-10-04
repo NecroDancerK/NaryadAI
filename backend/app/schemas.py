@@ -45,3 +45,27 @@ class WorkOrderEventRead(BaseModel):
     to_status: WorkOrderStatus
     comment: str | None
     created_at: datetime
+
+
+class AiInspectionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    work_order_id: int
+    verdict: str
+    score: int
+    confidence: float
+    checks: list[dict]
+    explanation: str
+    created_at: datetime
+
+
+class NotificationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    work_order_id: int
+    recipient_id: int
+    kind: str
+    title: str
+    message: str
+    is_read: bool
+    created_at: datetime

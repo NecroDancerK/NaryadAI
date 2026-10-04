@@ -1,10 +1,24 @@
+import asyncio
+from contextlib import asynccontextmanager, suppress
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routes import router
 from app.realtime import manager
+from app.deadlines import deadline_loop
 
-app = FastAPI(title="НарядAI API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    task = asyncio.create_task(deadline_loop())
+    yield
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+app = FastAPI(title="НарядAI API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
