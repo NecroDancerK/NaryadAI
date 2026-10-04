@@ -16,6 +16,8 @@ def enum_values(enum):
 class User(Base):
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(primary_key=True)
+    login: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    pin_hash: Mapped[str] = mapped_column(String(180))
     full_name: Mapped[str] = mapped_column(String(160))
     role: Mapped[UserRole] = mapped_column(Enum(UserRole, name="user_role", values_callable=enum_values))
     specialty: Mapped[str | None] = mapped_column(String(100))

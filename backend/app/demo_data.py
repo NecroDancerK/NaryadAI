@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain import AiVerdict, UserRole, WorkOrderPriority, WorkOrderStatus, WorkOrderType
 from app.models import AiInspection, Equipment, MaterialUsage, Site, User, WorkOrder, WorkOrderCompletion, WorkOrderEvent
+from app.auth import hash_pin
 
 WORKER_NAMES = [
     ("Беков Данияр", "Слесарь"), ("Иванов Павел", "Электрик"),
@@ -28,7 +29,7 @@ async def ensure_directories(session: AsyncSession) -> tuple[list[User], list[Eq
     for full_name, specialty in WORKER_NAMES:
         if len(workers) >= 15: break
         if not any(worker.full_name == full_name for worker in workers):
-            worker = User(full_name=full_name, role=UserRole.WORKER, specialty=specialty, is_on_shift=True)
+            worker = User(login=f"worker{len(workers) + 1}", pin_hash=hash_pin("0000"), full_name=full_name, role=UserRole.WORKER, specialty=specialty, is_on_shift=True)
             session.add(worker); workers.append(worker)
     await session.flush()
     equipment = list((await session.scalars(select(Equipment).order_by(Equipment.id))).all())

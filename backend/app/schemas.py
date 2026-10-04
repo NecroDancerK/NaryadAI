@@ -1,6 +1,26 @@
 from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
-from app.domain import WorkOrderPriority, WorkOrderStatus, WorkOrderType
+from app.domain import UserRole, WorkOrderPriority, WorkOrderStatus, WorkOrderType
+
+
+class AuthLogin(BaseModel):
+    login: str = Field(min_length=2, max_length=80)
+    pin: str = Field(pattern=r"^\d{4,8}$")
+
+
+class CurrentUserRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    login: str
+    full_name: str
+    role: UserRole
+    specialty: str | None
+
+
+class AuthToken(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: CurrentUserRead
 
 
 class WorkOrderCreate(BaseModel):
@@ -9,13 +29,11 @@ class WorkOrderCreate(BaseModel):
     site_id: int
     equipment_id: int
     assignee_id: int
-    master_id: int
     priority: WorkOrderPriority
     due_at: datetime
 
 
 class WorkOrderTransition(BaseModel):
-    actor_id: int
     status: WorkOrderStatus
     comment: str | None = Field(default=None, max_length=2000)
 

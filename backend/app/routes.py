@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from uuid import uuid4
@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
 from app.domain import UserRole, WorkOrderStatus, can_transition
+from app.auth import create_access_token, current_user, require_roles, verify_pin
 from app.inspection import inspect_order
 from app.analytics import default_period, shift_report, worker_ratings
 from app.demo_data import generate_demo_history
@@ -17,26 +18,58 @@ from app.history_analytics import analyze_history
 from app.llm import llm_status, semantic_review
 from app.deadlines import check_deadlines
 from app.models import AiInspection, Equipment, FaultCode, Material, MaterialUsage, Notification, Site, User, WorkOrder, WorkOrderCompletion, WorkOrderEvent, WorkOrderPhoto
-from app.schemas import AiInspectionRead, NotificationRead, WorkOrderCreate, WorkOrderEventRead, WorkOrderRead, WorkOrderTransition
+from app.schemas import AuthLogin, AuthToken, AiInspectionRead, CurrentUserRead, NotificationRead, WorkOrderCreate, WorkOrderEventRead, WorkOrderRead, WorkOrderTransition
 from app.realtime import manager
 
 router = APIRouter(prefix="/api")
 STORAGE_DIR = Path("storage/completions")
 
 
+async def accessible_order(order_id: int, user: User, session: AsyncSession, for_update: bool = False) -> WorkOrder:
+    query = select(WorkOrder).where(WorkOrder.id == order_id)
+    if for_update:
+        query = query.with_for_update()
+    order = await session.scalar(query)
+    if not order:
+        raise HTTPException(status_code=404, detail="Наряд не найден")
+    if user.role == UserRole.WORKER and order.assignee_id != user.id:
+        raise HTTPException(status_code=403, detail="Этот наряд назначен другому исполнителю")
+    if user.role == UserRole.MASTER and order.master_id != user.id:
+        raise HTTPException(status_code=403, detail="Этот наряд выдан другим мастером")
+    return order
+
+
+@router.post("/auth/login", response_model=AuthToken, tags=["auth"])
+async def login(payload: AuthLogin, session: AsyncSession = Depends(get_session)):
+    user = await session.scalar(select(User).where(func.lower(User.login) == payload.login.strip().lower()))
+    if not user or not verify_pin(payload.pin, user.pin_hash):
+        raise HTTPException(status_code=401, detail="Неверный логин или PIN-код")
+    return AuthToken(access_token=create_access_token(user), user=CurrentUserRead.model_validate(user))
+
+
+@router.get("/auth/me", response_model=CurrentUserRead, tags=["auth"])
+async def me(user: User = Depends(current_user)):
+    return user
+
+
 @router.get("/work-orders", response_model=list[WorkOrderRead], tags=["work orders"])
-async def list_work_orders(session: AsyncSession = Depends(get_session)):
-    return (await session.scalars(select(WorkOrder).order_by(WorkOrder.created_at.desc()))).all()
+async def list_work_orders(user: User = Depends(current_user), session: AsyncSession = Depends(get_session)):
+    recent_cutoff = datetime.now(UTC) - timedelta(hours=24)
+    query = select(WorkOrder).where(
+        (WorkOrder.status != WorkOrderStatus.CLOSED) | (WorkOrder.updated_at >= recent_cutoff)
+    )
+    if user.role == UserRole.WORKER:
+        query = query.where(WorkOrder.assignee_id == user.id)
+    elif user.role == UserRole.MASTER:
+        query = query.where(WorkOrder.master_id == user.id)
+    return (await session.scalars(query.order_by(WorkOrder.created_at.desc()).limit(200))).all()
 
 
 @router.post("/work-orders", response_model=WorkOrderRead, status_code=status.HTTP_201_CREATED, tags=["work orders"])
-async def create_work_order(payload: WorkOrderCreate, session: AsyncSession = Depends(get_session)):
+async def create_work_order(payload: WorkOrderCreate, master: User = Depends(require_roles(UserRole.MASTER, UserRole.ADMIN)), session: AsyncSession = Depends(get_session)):
     if payload.due_at <= datetime.now(UTC):
         raise HTTPException(status_code=422, detail="Срок исполнения должен быть в будущем")
-    master = await session.get(User, payload.master_id)
     assignee = await session.get(User, payload.assignee_id)
-    if not master or master.role != UserRole.MASTER:
-        raise HTTPException(status_code=422, detail="Мастер не найден")
     if not assignee or assignee.role != UserRole.WORKER:
         raise HTTPException(status_code=422, detail="Исполнитель не найден")
     equipment = await session.get(Equipment, payload.equipment_id)
@@ -44,10 +77,10 @@ async def create_work_order(payload: WorkOrderCreate, session: AsyncSession = De
         raise HTTPException(status_code=422, detail="Оборудование не относится к выбранному участку")
 
     next_id = (await session.scalar(select(func.coalesce(func.max(WorkOrder.id), 0))) or 0) + 1
-    order = WorkOrder(number=f"Н-{next_id:05d}", status=WorkOrderStatus.ISSUED, **payload.model_dump())
+    order = WorkOrder(number=f"Н-{next_id:05d}", status=WorkOrderStatus.ISSUED, master_id=master.id, **payload.model_dump())
     session.add(order)
     await session.flush()
-    session.add(WorkOrderEvent(work_order_id=order.id, actor_id=payload.master_id, from_status=None, to_status=WorkOrderStatus.ISSUED, comment="Наряд выдан"))
+    session.add(WorkOrderEvent(work_order_id=order.id, actor_id=master.id, from_status=None, to_status=WorkOrderStatus.ISSUED, comment="Наряд выдан"))
     await session.commit()
     await session.refresh(order)
     await manager.broadcast({"type": "work_order.created", "work_order_id": order.id})
@@ -55,19 +88,23 @@ async def create_work_order(payload: WorkOrderCreate, session: AsyncSession = De
 
 
 @router.post("/work-orders/{order_id}/transitions", response_model=WorkOrderRead, tags=["work orders"])
-async def transition_work_order(order_id: int, payload: WorkOrderTransition, session: AsyncSession = Depends(get_session)):
-    order = await session.scalar(select(WorkOrder).where(WorkOrder.id == order_id).with_for_update())
-    if not order:
-        raise HTTPException(status_code=404, detail="Наряд не найден")
-    if not await session.get(User, payload.actor_id):
-        raise HTTPException(status_code=422, detail="Пользователь не найден")
+async def transition_work_order(order_id: int, payload: WorkOrderTransition, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)):
+    order = await accessible_order(order_id, user, session, for_update=True)
+    worker_targets = {WorkOrderStatus.ACCEPTED, WorkOrderStatus.QUEUED, WorkOrderStatus.REJECTED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.PAUSED}
+    master_targets = {WorkOrderStatus.ISSUED, WorkOrderStatus.REWORK, WorkOrderStatus.CLOSED}
+    if user.role == UserRole.WORKER and payload.status not in worker_targets:
+        raise HTTPException(status_code=403, detail="Переход недоступен исполнителю")
+    if user.role == UserRole.MASTER and payload.status not in master_targets:
+        raise HTTPException(status_code=403, detail="Переход недоступен мастеру")
+    if user.role == UserRole.MANAGER:
+        raise HTTPException(status_code=403, detail="Руководителю доступен только просмотр")
     if not can_transition(order.status, payload.status):
         raise HTTPException(status_code=409, detail=f"Переход {order.status.value} → {payload.status.value} запрещён")
     if payload.status in {WorkOrderStatus.REJECTED, WorkOrderStatus.PAUSED} and not payload.comment:
         raise HTTPException(status_code=422, detail="Для отклонения или приостановки требуется причина")
     previous = order.status
     order.status = payload.status
-    session.add(WorkOrderEvent(work_order_id=order.id, actor_id=payload.actor_id, from_status=previous, to_status=payload.status, comment=payload.comment))
+    session.add(WorkOrderEvent(work_order_id=order.id, actor_id=user.id, from_status=previous, to_status=payload.status, comment=payload.comment))
     await session.commit()
     await session.refresh(order)
     await manager.broadcast({"type": "work_order.status_changed", "work_order_id": order.id, "status": order.status.value})
@@ -75,18 +112,15 @@ async def transition_work_order(order_id: int, payload: WorkOrderTransition, ses
 
 
 @router.get("/work-orders/{order_id}/events", response_model=list[WorkOrderEventRead], tags=["work orders"])
-async def list_events(order_id: int, session: AsyncSession = Depends(get_session)):
-    if not await session.get(WorkOrder, order_id):
-        raise HTTPException(status_code=404, detail="Наряд не найден")
+async def list_events(order_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)):
+    await accessible_order(order_id, user, session)
     query = select(WorkOrderEvent).where(WorkOrderEvent.work_order_id == order_id).order_by(WorkOrderEvent.created_at, WorkOrderEvent.id)
     return (await session.scalars(query)).all()
 
 
 @router.post("/work-orders/{order_id}/ai-review", response_model=AiInspectionRead, tags=["AI inspection"])
-async def run_ai_review(order_id: int, session: AsyncSession = Depends(get_session)):
-    order = await session.scalar(select(WorkOrder).where(WorkOrder.id == order_id).with_for_update())
-    if not order:
-        raise HTTPException(status_code=404, detail="Наряд не найден")
+async def run_ai_review(order_id: int, master: User = Depends(require_roles(UserRole.MASTER, UserRole.ADMIN)), session: AsyncSession = Depends(get_session)):
+    order = await accessible_order(order_id, master, session, for_update=True)
     existing = await session.scalar(select(AiInspection).where(AiInspection.work_order_id == order_id))
     if existing:
         return existing
@@ -106,7 +140,7 @@ async def run_ai_review(order_id: int, session: AsyncSession = Depends(get_sessi
     inspection = AiInspection(work_order_id=order.id, verdict=verdict, score=score, confidence=confidence, checks=checks, explanation=explanation, analysis_source=llm_result.source, model_name=llm_result.model, llm_error=llm_result.error)
     session.add(inspection)
     order.status = WorkOrderStatus.AI_REVIEW
-    session.add(WorkOrderEvent(work_order_id=order.id, actor_id=order.master_id, from_status=WorkOrderStatus.COMPLETED, to_status=WorkOrderStatus.AI_REVIEW, comment=f"Автоматическая проверка: {verdict}, {score}/100"))
+    session.add(WorkOrderEvent(work_order_id=order.id, actor_id=master.id, from_status=WorkOrderStatus.COMPLETED, to_status=WorkOrderStatus.AI_REVIEW, comment=f"Автоматическая проверка: {verdict}, {score}/100"))
     await session.commit()
     await session.refresh(inspection)
     await manager.broadcast({"type": "work_order.ai_reviewed", "work_order_id": order.id, "status": order.status.value, "verdict": verdict})
@@ -114,31 +148,39 @@ async def run_ai_review(order_id: int, session: AsyncSession = Depends(get_sessi
 
 
 @router.get("/work-orders/{order_id}/ai-review", response_model=AiInspectionRead | None, tags=["AI inspection"])
-async def get_ai_review(order_id: int, session: AsyncSession = Depends(get_session)):
+async def get_ai_review(order_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)):
+    await accessible_order(order_id, user, session)
     return await session.scalar(select(AiInspection).where(AiInspection.work_order_id == order_id))
 
 
 @router.get("/ai-reviews", response_model=list[AiInspectionRead], tags=["AI inspection"])
-async def list_ai_reviews(session: AsyncSession = Depends(get_session)):
-    return (await session.scalars(select(AiInspection).order_by(AiInspection.created_at.desc()))).all()
+async def list_ai_reviews(user: User = Depends(current_user), session: AsyncSession = Depends(get_session)):
+    query = select(AiInspection).join(WorkOrder, WorkOrder.id == AiInspection.work_order_id)
+    if user.role == UserRole.WORKER:
+        query = query.where(WorkOrder.assignee_id == user.id)
+    elif user.role == UserRole.MASTER:
+        query = query.where(WorkOrder.master_id == user.id)
+    return (await session.scalars(query.order_by(AiInspection.created_at.desc()))).all()
 
 
 @router.get("/ai/status", tags=["AI inspection"])
-async def get_llm_status():
+async def get_llm_status(_: User = Depends(current_user)):
     return await llm_status()
 
 
 @router.get("/notifications", response_model=list[NotificationRead], tags=["notifications"])
-async def list_notifications(recipient_id: int, session: AsyncSession = Depends(get_session)):
-    query = select(Notification).where(Notification.recipient_id == recipient_id).order_by(Notification.created_at.desc()).limit(50)
+async def list_notifications(user: User = Depends(current_user), session: AsyncSession = Depends(get_session)):
+    query = select(Notification).where(Notification.recipient_id == user.id).order_by(Notification.created_at.desc()).limit(50)
     return (await session.scalars(query)).all()
 
 
 @router.post("/notifications/{notification_id}/read", response_model=NotificationRead, tags=["notifications"])
-async def read_notification(notification_id: int, session: AsyncSession = Depends(get_session)):
+async def read_notification(notification_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)):
     notification = await session.get(Notification, notification_id)
     if not notification:
         raise HTTPException(status_code=404, detail="Уведомление не найдено")
+    if notification.recipient_id != user.id and user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Уведомление принадлежит другому пользователю")
     notification.is_read = True
     await session.commit()
     await session.refresh(notification)
@@ -146,7 +188,7 @@ async def read_notification(notification_id: int, session: AsyncSession = Depend
 
 
 @router.post("/system/check-deadlines", tags=["system"])
-async def run_deadline_check():
+async def run_deadline_check(_: User = Depends(require_roles(UserRole.MASTER, UserRole.ADMIN))):
     created = await check_deadlines()
     return {"created": len(created), "notification_ids": [item.id for item in created]}
 
@@ -162,24 +204,24 @@ def report_period(date_from: datetime | None, date_to: datetime | None) -> tuple
 
 
 @router.get("/reports/shift", tags=["reports"])
-async def get_shift_report(date_from: datetime | None = None, date_to: datetime | None = None, session: AsyncSession = Depends(get_session)):
+async def get_shift_report(date_from: datetime | None = None, date_to: datetime | None = None, _: User = Depends(require_roles(UserRole.MASTER, UserRole.MANAGER, UserRole.ADMIN)), session: AsyncSession = Depends(get_session)):
     start, end = report_period(date_from, date_to)
     return await shift_report(session, start, end)
 
 
 @router.get("/reports/ratings", tags=["reports"])
-async def get_worker_ratings(date_from: datetime | None = None, date_to: datetime | None = None, session: AsyncSession = Depends(get_session)):
+async def get_worker_ratings(date_from: datetime | None = None, date_to: datetime | None = None, _: User = Depends(require_roles(UserRole.MASTER, UserRole.MANAGER, UserRole.ADMIN)), session: AsyncSession = Depends(get_session)):
     start, end = report_period(date_from, date_to)
     return {"period": {"from": start, "to": end}, "weights": {"quality": 35, "timeliness": 25, "reliability": 15, "productivity": 15, "discipline": 10}, "workers": await worker_ratings(session, start, end)}
 
 
 @router.post("/system/seed-demo-history", tags=["system"])
-async def seed_demo_history(session: AsyncSession = Depends(get_session)):
+async def seed_demo_history(_: User = Depends(require_roles(UserRole.MASTER, UserRole.ADMIN)), session: AsyncSession = Depends(get_session)):
     return await generate_demo_history(session)
 
 
 @router.get("/analytics/history", tags=["analytics"])
-async def history_analysis(days: int = 90, session: AsyncSession = Depends(get_session)):
+async def history_analysis(days: int = 90, _: User = Depends(require_roles(UserRole.MASTER, UserRole.MANAGER, UserRole.ADMIN)), session: AsyncSession = Depends(get_session)):
     if not 7 <= days <= 365:
         raise HTTPException(status_code=422, detail="Период должен быть от 7 до 365 дней")
     return await analyze_history(session, days)
@@ -188,20 +230,18 @@ async def history_analysis(days: int = 90, session: AsyncSession = Depends(get_s
 @router.post("/work-orders/{order_id}/complete", response_model=WorkOrderRead, tags=["work orders"])
 async def complete_work_order(
     order_id: int,
-    actor_id: int = Form(...),
     work_performed: str = Form(..., min_length=5, max_length=4000),
     fault_code_id: int = Form(...),
     materials_json: str = Form("[]"),
     comment: str | None = Form(None, max_length=2000),
     photo: UploadFile | None = File(None),
+    user: User = Depends(require_roles(UserRole.WORKER, UserRole.ADMIN)),
     session: AsyncSession = Depends(get_session),
 ):
-    order = await session.scalar(select(WorkOrder).where(WorkOrder.id == order_id).with_for_update())
-    if not order:
-        raise HTTPException(status_code=404, detail="Наряд не найден")
+    order = await accessible_order(order_id, user, session, for_update=True)
     if order.status != WorkOrderStatus.IN_PROGRESS:
         raise HTTPException(status_code=409, detail="Закрыть можно только наряд в работе")
-    if actor_id != order.assignee_id:
+    if user.role != UserRole.ADMIN and user.id != order.assignee_id:
         raise HTTPException(status_code=403, detail="Закрыть наряд может только назначенный исполнитель")
     if not await session.get(FaultCode, fault_code_id):
         raise HTTPException(status_code=422, detail="Шифр неисправности не найден")
@@ -232,7 +272,7 @@ async def complete_work_order(
         if len(photo_data) > 10 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="Фото превышает 10 МБ")
 
-    completion = WorkOrderCompletion(work_order_id=order.id, fault_code_id=fault_code_id, work_performed=work_performed, comment=comment, completed_by=actor_id)
+    completion = WorkOrderCompletion(work_order_id=order.id, fault_code_id=fault_code_id, work_performed=work_performed, comment=comment, completed_by=user.id)
     session.add(completion)
     await session.flush()
     for material_id, quantity in usages:
@@ -242,9 +282,9 @@ async def complete_work_order(
         STORAGE_DIR.mkdir(parents=True, exist_ok=True)
         photo_path = STORAGE_DIR / f"{order.id}-{uuid4().hex}{suffix}"
         photo_path.write_bytes(photo_data)
-        session.add(WorkOrderPhoto(work_order_id=order.id, photo_type="after", file_path=str(photo_path), original_name=photo.filename, content_type=photo.content_type, uploaded_by=actor_id))
+        session.add(WorkOrderPhoto(work_order_id=order.id, photo_type="after", file_path=str(photo_path), original_name=photo.filename, content_type=photo.content_type, uploaded_by=user.id))
     order.status = WorkOrderStatus.COMPLETED
-    session.add(WorkOrderEvent(work_order_id=order.id, actor_id=actor_id, from_status=WorkOrderStatus.IN_PROGRESS, to_status=WorkOrderStatus.COMPLETED, comment="Исполнитель отправил наряд на проверку"))
+    session.add(WorkOrderEvent(work_order_id=order.id, actor_id=user.id, from_status=WorkOrderStatus.IN_PROGRESS, to_status=WorkOrderStatus.COMPLETED, comment="Исполнитель отправил наряд на проверку"))
     try:
         await session.commit()
     except Exception:
@@ -257,7 +297,7 @@ async def complete_work_order(
 
 
 @router.get("/directories", tags=["directories"])
-async def directories(session: AsyncSession = Depends(get_session)):
+async def directories(_: User = Depends(current_user), session: AsyncSession = Depends(get_session)):
     users = (await session.scalars(select(User).order_by(User.id))).all()
     equipment = (await session.scalars(select(Equipment).order_by(Equipment.id))).all()
     sites = (await session.scalars(select(Site).order_by(Site.id))).all()
