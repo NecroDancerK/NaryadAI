@@ -14,6 +14,7 @@ from app.inspection import inspect_order
 from app.analytics import default_period, shift_report, worker_ratings
 from app.demo_data import generate_demo_history
 from app.history_analytics import analyze_history
+from app.llm import llm_status, semantic_review
 from app.deadlines import check_deadlines
 from app.models import AiInspection, Equipment, FaultCode, Material, MaterialUsage, Notification, Site, User, WorkOrder, WorkOrderCompletion, WorkOrderEvent, WorkOrderPhoto
 from app.schemas import AiInspectionRead, NotificationRead, WorkOrderCreate, WorkOrderEventRead, WorkOrderRead, WorkOrderTransition
@@ -96,8 +97,13 @@ async def run_ai_review(order_id: int, session: AsyncSession = Depends(get_sessi
         raise HTTPException(status_code=409, detail="Данные закрытия отсутствуют")
     usages = list((await session.scalars(select(MaterialUsage).where(MaterialUsage.completion_id == completion.id))).all())
     photo_count = await session.scalar(select(func.count(WorkOrderPhoto.id)).where(WorkOrderPhoto.work_order_id == order_id, WorkOrderPhoto.photo_type == "after")) or 0
-    verdict, score, confidence, checks, explanation = inspect_order(order, completion, usages, photo_count)
-    inspection = AiInspection(work_order_id=order.id, verdict=verdict, score=score, confidence=confidence, checks=checks, explanation=explanation)
+    fault = await session.get(FaultCode, completion.fault_code_id)
+    material_ids = {usage.material_id for usage in usages}
+    material_map = {item.id: item for item in (await session.scalars(select(Material).where(Material.id.in_(material_ids)))).all()} if material_ids else {}
+    material_labels = [f"{material_map[usage.material_id].name}: {usage.quantity} {material_map[usage.material_id].unit}" for usage in usages if usage.material_id in material_map]
+    llm_result = await semantic_review(order.description, completion.work_performed, f"{fault.code} — {fault.name}" if fault else "не указан", material_labels)
+    verdict, score, confidence, checks, explanation = inspect_order(order, completion, usages, photo_count, llm_result)
+    inspection = AiInspection(work_order_id=order.id, verdict=verdict, score=score, confidence=confidence, checks=checks, explanation=explanation, analysis_source=llm_result.source, model_name=llm_result.model, llm_error=llm_result.error)
     session.add(inspection)
     order.status = WorkOrderStatus.AI_REVIEW
     session.add(WorkOrderEvent(work_order_id=order.id, actor_id=order.master_id, from_status=WorkOrderStatus.COMPLETED, to_status=WorkOrderStatus.AI_REVIEW, comment=f"Автоматическая проверка: {verdict}, {score}/100"))
@@ -115,6 +121,11 @@ async def get_ai_review(order_id: int, session: AsyncSession = Depends(get_sessi
 @router.get("/ai-reviews", response_model=list[AiInspectionRead], tags=["AI inspection"])
 async def list_ai_reviews(session: AsyncSession = Depends(get_session)):
     return (await session.scalars(select(AiInspection).order_by(AiInspection.created_at.desc()))).all()
+
+
+@router.get("/ai/status", tags=["AI inspection"])
+async def get_llm_status():
+    return await llm_status()
 
 
 @router.get("/notifications", response_model=list[NotificationRead], tags=["notifications"])

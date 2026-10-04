@@ -56,6 +56,9 @@ class AiInspectionRead(BaseModel):
     confidence: float
     checks: list[dict]
     explanation: str
+    analysis_source: str
+    model_name: str | None
+    llm_error: str | None
     created_at: datetime
 
 
