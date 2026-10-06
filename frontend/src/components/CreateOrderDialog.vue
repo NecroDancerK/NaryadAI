@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, reactive, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { date } from 'quasar'
 import type { Directories } from '../api'
 
 const props = defineProps<{ modelValue: boolean; directories?: Directories; loading: boolean }>()
-const emit = defineEmits<{ 'update:modelValue': [value: boolean]; submit: [payload: Record<string, unknown>] }>()
+const emit = defineEmits<{ 'update:modelValue': [value: boolean]; submit: [payload: { data: Record<string, unknown>; photos: File[] }] }>()
 
 const form = reactive({ description: '', work_type: 'unplanned', site_id: 1, equipment_id: 1, assignee_id: 2, priority: 'normal', due_at: '' })
+const photos = ref<File[]>([])
 const workers = computed(() => props.directories?.users.filter(user => user.role === 'worker') ?? [])
 const equipment = computed(() => props.directories?.equipment.filter(item => item.site_id === form.site_id) ?? [])
 
@@ -18,13 +19,14 @@ function reset() {
   form.assignee_id = workers.value[0]?.id ?? 2
   form.priority = 'normal'
   form.due_at = date.formatDate(Date.now() + 7_200_000, 'YYYY-MM-DDTHH:mm')
+  photos.value = []
 }
 
 watch(() => props.modelValue, value => { if (value) reset() })
 watch(() => form.site_id, () => { form.equipment_id = equipment.value[0]?.id ?? 0 })
 
 function submit() {
-  emit('submit', { ...form, due_at: new Date(form.due_at).toISOString() })
+  emit('submit', { data: { ...form, due_at: new Date(form.due_at).toISOString() }, photos: photos.value })
 }
 </script>
 
@@ -39,6 +41,7 @@ function submit() {
           <div class="row q-col-gutter-md"><q-select v-model="form.site_id" class="col-12 col-sm-6" outlined emit-value map-options label="Участок *" :options="directories?.sites" option-value="id" option-label="name"/><q-select v-model="form.equipment_id" class="col-12 col-sm-6" outlined emit-value map-options label="Оборудование *" :options="equipment" option-value="id" option-label="name"/></div>
           <q-select v-model="form.assignee_id" outlined emit-value map-options label="Исполнитель *" :options="workers" option-value="id" option-label="full_name"/>
           <q-input v-model="form.due_at" outlined type="datetime-local" label="Срок исполнения *"><template #prepend><q-icon name="event"/></template></q-input>
+          <q-file v-model="photos" outlined multiple accept="image/*" max-files="5" max-file-size="10485760" label="Фото неисправности, до 5"><template #prepend><q-icon name="photo_camera"/></template></q-file>
         </q-card-section>
         <q-card-actions align="right" class="dialog-actions"><q-btn flat no-caps label="Отмена" @click="emit('update:modelValue', false)"/><q-btn unelevated no-caps color="primary" type="submit" icon="send" label="Выдать наряд" :loading="loading"/></q-card-actions>
       </q-form>

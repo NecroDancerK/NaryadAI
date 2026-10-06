@@ -5,6 +5,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -65,8 +67,7 @@ async def list_work_orders(user: User = Depends(current_user), session: AsyncSes
     return (await session.scalars(query.order_by(WorkOrder.created_at.desc()).limit(200))).all()
 
 
-@router.post("/work-orders", response_model=WorkOrderRead, status_code=status.HTTP_201_CREATED, tags=["work orders"])
-async def create_work_order(payload: WorkOrderCreate, master: User = Depends(require_roles(UserRole.MASTER, UserRole.ADMIN)), session: AsyncSession = Depends(get_session)):
+async def persist_work_order(payload: WorkOrderCreate, master: User, session: AsyncSession, photos: list[tuple[UploadFile, bytes]] | None = None) -> WorkOrder:
     if payload.due_at <= datetime.now(UTC):
         raise HTTPException(status_code=422, detail="Срок исполнения должен быть в будущем")
     assignee = await session.get(User, payload.assignee_id)
@@ -81,10 +82,55 @@ async def create_work_order(payload: WorkOrderCreate, master: User = Depends(req
     session.add(order)
     await session.flush()
     session.add(WorkOrderEvent(work_order_id=order.id, actor_id=master.id, from_status=None, to_status=WorkOrderStatus.ISSUED, comment="Наряд выдан"))
-    await session.commit()
+    saved_paths: list[Path] = []
+    try:
+        for photo, data in photos or []:
+            suffix = Path(photo.filename or "photo.jpg").suffix.lower()[:10] or ".jpg"
+            STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+            photo_path = STORAGE_DIR / f"{order.id}-{uuid4().hex}{suffix}"
+            photo_path.write_bytes(data)
+            saved_paths.append(photo_path)
+            session.add(WorkOrderPhoto(work_order_id=order.id, photo_type="before", file_path=str(photo_path), original_name=photo.filename, content_type=photo.content_type or "application/octet-stream", uploaded_by=master.id))
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        for photo_path in saved_paths:
+            photo_path.unlink(missing_ok=True)
+        raise
     await session.refresh(order)
     await manager.broadcast({"type": "work_order.created", "work_order_id": order.id})
     return order
+
+
+@router.post("/work-orders", response_model=WorkOrderRead, status_code=status.HTTP_201_CREATED, tags=["work orders"])
+async def create_work_order(payload: WorkOrderCreate, master: User = Depends(require_roles(UserRole.MASTER, UserRole.ADMIN)), session: AsyncSession = Depends(get_session)):
+    return await persist_work_order(payload, master, session)
+
+
+@router.post("/work-orders/with-photos", response_model=WorkOrderRead, status_code=status.HTTP_201_CREATED, tags=["work orders"])
+async def create_work_order_with_photos(
+    payload: str = Form(...),
+    photos: list[UploadFile] = File(default=[]),
+    master: User = Depends(require_roles(UserRole.MASTER, UserRole.ADMIN)),
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        work_order = WorkOrderCreate.model_validate_json(payload)
+    except ValidationError as error:
+        raise HTTPException(status_code=422, detail=error.errors()) from error
+    if len(photos) > 5:
+        raise HTTPException(status_code=422, detail="Можно приложить не более 5 фотографий")
+
+    photo_data: list[tuple[UploadFile, bytes]] = []
+    for photo in photos:
+        if not photo.content_type or not photo.content_type.startswith("image/"):
+            raise HTTPException(status_code=422, detail="Допускаются только изображения")
+        data = await photo.read(10 * 1024 * 1024 + 1)
+        if len(data) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Фото превышает 10 МБ")
+        photo_data.append((photo, data))
+
+    return await persist_work_order(work_order, master, session, photo_data)
 
 
 @router.post("/work-orders/{order_id}/transitions", response_model=WorkOrderRead, tags=["work orders"])
@@ -116,6 +162,97 @@ async def list_events(order_id: int, user: User = Depends(current_user), session
     await accessible_order(order_id, user, session)
     query = select(WorkOrderEvent).where(WorkOrderEvent.work_order_id == order_id).order_by(WorkOrderEvent.created_at, WorkOrderEvent.id)
     return (await session.scalars(query)).all()
+
+
+@router.get("/work-orders/{order_id}/photos/{photo_id}/file", tags=["work orders"])
+async def get_work_order_photo(order_id: int, photo_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)):
+    await accessible_order(order_id, user, session)
+    photo = await session.scalar(select(WorkOrderPhoto).where(
+        WorkOrderPhoto.id == photo_id,
+        WorkOrderPhoto.work_order_id == order_id,
+    ))
+    if not photo or not Path(photo.file_path).is_file():
+        raise HTTPException(status_code=404, detail="Фото не найдено")
+    return FileResponse(photo.file_path, media_type=photo.content_type)
+
+
+@router.get("/work-orders/{order_id}/report", tags=["work orders"])
+async def get_work_order_report(order_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)):
+    order = await accessible_order(order_id, user, session)
+    site = await session.get(Site, order.site_id)
+    equipment = await session.get(Equipment, order.equipment_id)
+    assignee = await session.get(User, order.assignee_id)
+    master = await session.get(User, order.master_id)
+    event_rows = (await session.execute(
+        select(WorkOrderEvent, User.full_name)
+        .join(User, User.id == WorkOrderEvent.actor_id)
+        .where(WorkOrderEvent.work_order_id == order.id)
+        .order_by(WorkOrderEvent.created_at, WorkOrderEvent.id)
+    )).all()
+    completion = await session.scalar(select(WorkOrderCompletion).where(WorkOrderCompletion.work_order_id == order.id))
+    inspection = await session.scalar(select(AiInspection).where(AiInspection.work_order_id == order.id))
+    photos = (await session.scalars(
+        select(WorkOrderPhoto).where(WorkOrderPhoto.work_order_id == order.id).order_by(WorkOrderPhoto.created_at, WorkOrderPhoto.id)
+    )).all()
+
+    completion_data = None
+    if completion:
+        fault = await session.get(FaultCode, completion.fault_code_id)
+        material_rows = (await session.execute(
+            select(MaterialUsage, Material)
+            .join(Material, Material.id == MaterialUsage.material_id)
+            .where(MaterialUsage.completion_id == completion.id)
+            .order_by(Material.name)
+        )).all()
+        completion_data = {
+            "work_performed": completion.work_performed,
+            "comment": completion.comment,
+            "created_at": completion.created_at,
+            "fault_code": {"code": fault.code, "name": fault.name} if fault else None,
+            "materials": [{"name": material.name, "quantity": usage.quantity, "unit": material.unit} for usage, material in material_rows],
+        }
+
+    return {
+        "order": {
+            "id": order.id,
+            "number": order.number,
+            "description": order.description,
+            "work_type": order.work_type.value,
+            "priority": order.priority.value,
+            "status": order.status.value,
+            "due_at": order.due_at,
+            "created_at": order.created_at,
+            "site_name": site.name if site else None,
+            "equipment_name": equipment.name if equipment else None,
+            "inventory_number": equipment.inventory_number if equipment else None,
+            "assignee_name": assignee.full_name if assignee else None,
+            "master_name": master.full_name if master else None,
+        },
+        "events": [{
+            "actor_name": actor_name,
+            "from_status": event.from_status.value if event.from_status else None,
+            "to_status": event.to_status.value,
+            "comment": event.comment,
+            "created_at": event.created_at,
+        } for event, actor_name in event_rows],
+        "completion": completion_data,
+        "inspection": {
+            "verdict": inspection.verdict.value,
+            "score": inspection.score,
+            "confidence": float(inspection.confidence),
+            "checks": inspection.checks,
+            "explanation": inspection.explanation,
+            "analysis_source": inspection.analysis_source,
+            "model_name": inspection.model_name,
+            "created_at": inspection.created_at,
+        } if inspection else None,
+        "photos": [{
+            "id": photo.id,
+            "photo_type": photo.photo_type,
+            "original_name": photo.original_name,
+            "created_at": photo.created_at,
+        } for photo in photos],
+    }
 
 
 @router.post("/work-orders/{order_id}/ai-review", response_model=AiInspectionRead, tags=["AI inspection"])
@@ -310,3 +447,56 @@ async def directories(_: User = Depends(current_user), session: AsyncSession = D
         "fault_codes": [{"id": f.id, "code": f.code, "name": f.name} for f in fault_codes],
         "materials": [{"id": m.id, "name": m.name, "unit": m.unit} for m in materials],
     }
+
+
+@router.get("/shift/workers", tags=["shift"])
+async def shift_workers(
+    _: User = Depends(require_roles(UserRole.MASTER, UserRole.ADMIN)),
+    session: AsyncSession = Depends(get_session),
+):
+    workers = list((await session.scalars(select(User).where(User.role == UserRole.WORKER).order_by(User.full_name))).all())
+    if not workers:
+        return []
+
+    worker_ids = [worker.id for worker in workers]
+    active_statuses = {
+        WorkOrderStatus.ISSUED,
+        WorkOrderStatus.ACCEPTED,
+        WorkOrderStatus.QUEUED,
+        WorkOrderStatus.IN_PROGRESS,
+        WorkOrderStatus.PAUSED,
+        WorkOrderStatus.REWORK,
+    }
+    orders = list((await session.scalars(
+        select(WorkOrder).where(
+            WorkOrder.assignee_id.in_(worker_ids),
+            WorkOrder.status.in_(active_statuses),
+        ).order_by(WorkOrder.created_at)
+    )).all())
+    orders_by_worker: dict[int, list[WorkOrder]] = {worker_id: [] for worker_id in worker_ids}
+    for order in orders:
+        orders_by_worker[order.assignee_id].append(order)
+
+    result = []
+    for worker in workers:
+        assigned = orders_by_worker[worker.id]
+        current_order = next((order for order in assigned if order.status in {
+            WorkOrderStatus.ACCEPTED,
+            WorkOrderStatus.IN_PROGRESS,
+            WorkOrderStatus.PAUSED,
+        }), None)
+        waiting = [order for order in assigned if order.status in {
+            WorkOrderStatus.ISSUED,
+            WorkOrderStatus.QUEUED,
+            WorkOrderStatus.REWORK,
+        }]
+        state = "off_shift" if not worker.is_on_shift else "busy" if current_order else "queued" if waiting else "free"
+        result.append({
+            "id": worker.id,
+            "full_name": worker.full_name,
+            "specialty": worker.specialty,
+            "state": state,
+            "current_order_number": current_order.number if current_order else None,
+            "queue_count": len(waiting),
+        })
+    return result
