@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "target": "visible_liquid_trace",
+  "description": "Only visible liquid traces on pump/reducer housings; no diagnosis, fluid identification or repair approval",
+  "samples": []
+}

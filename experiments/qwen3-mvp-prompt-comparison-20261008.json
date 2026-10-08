@@ -1,0 +1,31 @@
+{
+  "changed_variable": "system_prompt",
+  "model": "NaryadAI-Qwen3-VL-4B Q4_K_M + F16 mmproj",
+  "samples": 8,
+  "dataset": "Previously used synthetic junction images; not an independent real-equipment holdout",
+  "baseline_report_sha256": "727f653da781ce4b87b689acb4a7e43876279761405bc2a997fe25caf816ff23",
+  "candidate_report_sha256": "b83ee8257e7e2a5a3e23de48e8e9b6f35b8f29debe897e5d4c8d9384f6f851aa",
+  "baseline": {
+    "prompt_version": "visible-observations-v1",
+    "normalized_valid_results": 8,
+    "errors": 0,
+    "median_seconds": 2.6435,
+    "max_seconds": 3.702,
+    "observed_total_gpu_max_mib": 4540,
+    "observation_vocabulary_cases": 4
+  },
+  "candidate": {
+    "prompt_version": "experiment-visible-observations-v2",
+    "normalized_valid_results": 8,
+    "errors": 0,
+    "median_seconds": 3.851,
+    "max_seconds": 5.073,
+    "observed_total_gpu_max_mib": 4542,
+    "observation_vocabulary_cases": 5
+  },
+  "quality_score": null,
+  "decision": "Not promoted to production; existing model remains advisory",
+  "reason": "Candidate still suggests destruction or fragments on samples 1, 2 and 4 despite instructions; added limitations do not establish groundedness. Longer inference without demonstrated quality improvement.",
+  "caveats": "Vocabulary counts include negations and possibly legitimate observations; they are not error rates. No expert grading, no controlled performance benchmark, GPU numbers are sampled total use, not guaranteed peaks.",
+  "local_comparison": ".local-models/evaluations/qwen3-mvp-comparison-20261008/"
+}
