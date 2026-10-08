@@ -46,6 +46,9 @@ body.body--dark {
   --app-blue-text: #a1c8f5;
 }
 body { background: var(--app-page); color: var(--app-text); }
+/* Quasar's heading line heights target much larger default font sizes.
+   Keep spacing proportional when our views use compact headings. */
+h1, h2, h3, h4 { line-height: 1.25; }
 body.body--dark .text-grey-6,
 body.body--dark .text-grey-7 { color: var(--app-muted) !important; }
 body.body--dark .bg-green-1 { background: var(--app-green-bg) !important; }

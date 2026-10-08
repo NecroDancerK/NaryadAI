@@ -48,6 +48,7 @@ def create_access_token(user: User) -> str:
     payload = {
         "sub": user.id,
         "role": user.role.value,
+        "ver": user.session_version or 0,
         "exp": int(time.time()) + settings.access_token_minutes * 60,
     }
     body = _b64encode(json.dumps(payload, separators=(",", ":")).encode())
@@ -78,9 +79,14 @@ async def current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Требуется вход в систему")
     payload = decode_access_token(credentials.credentials)
     user = await session.get(User, payload["sub"])
-    if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Пользователь не найден")
+    if not valid_user_session(user, payload):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Сессия отозвана или учётная запись заблокирована")
     return user
+
+
+def valid_user_session(user: User | None, payload: dict) -> bool:
+    # Legacy tokens without ver remain valid only until the account's first revocation.
+    return bool(user and user.is_active and payload.get("ver", 0) == user.session_version)
 
 
 def require_roles(*roles: UserRole) -> Callable:

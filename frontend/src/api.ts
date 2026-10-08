@@ -1,6 +1,9 @@
 export type WorkOrderStatus = 'issued' | 'accepted' | 'queued' | 'rejected' | 'in_progress' | 'paused' | 'completed' | 'ai_review' | 'rework' | 'closed'
 export type UserRole = 'master' | 'worker' | 'manager' | 'admin'
 export interface CurrentUser { id:number; login:string; full_name:string; role:UserRole; specialty:string|null }
+export interface AdminUser extends CurrentUser { is_active:boolean; session_version:number }
+export interface AdminUserInput { full_name:string; role:UserRole; specialty:string|null }
+export interface AdminAudit { id:number; actor_id:number; target_id:number; action:string; changes:Record<string,unknown>; created_at:string }
 export interface AuthSession { access_token:string; token_type:string; user:CurrentUser }
 export interface WorkOrder { id:number; number:string; description:string; work_type:'planned'|'unplanned'; site_id:number; equipment_id:number; assignee_id:number; master_id:number; priority:'emergency'|'high'|'normal'|'planned'; status:WorkOrderStatus; due_at:string; created_at:string }
 export interface ShiftWorker { id:number; full_name:string; specialty:string|null; state:'free'|'busy'|'queued'|'off_shift'; current_order_number:string|null; queue_count:number }
@@ -33,6 +36,11 @@ export const setAccessToken = (token:string|null) => token ? localStorage.setIte
 export const wsUrl = () => `${websocketBase(import.meta.env.VITE_WS_URL, window.location.origin)}/api/ws?token=${encodeURIComponent(getAccessToken() ?? '')}`
 async function request<T>(path:string, options?:RequestInit):Promise<T> { const token=getAccessToken(); let response:Response; try{response=await fetch(`${apiUrl}${path}`,{...options,headers:{...(options?.body instanceof FormData?{}:{'Content-Type':'application/json'}),...(token?{Authorization:`Bearer ${token}`}:{ }),...options?.headers}})}catch{throw new NetworkError()} if(!response.ok){const body=await response.json().catch(()=>null);if(response.status===401&&path!=='/api/auth/login'){setAccessToken(null);window.dispatchEvent(new Event('naryad-auth-expired'))}throw new ApiError(body?.detail??`Ошибка API: ${response.status}`,response.status)} return response.json() as Promise<T> }
 export const api={
+  adminUsers:(offset=0)=>request<AdminUser[]>(`/api/admin/users?offset=${offset}&limit=50`),
+  createUser:(input:AdminUserInput & {login:string;pin:string})=>request<AdminUser>('/api/admin/users',{method:'POST',body:JSON.stringify(input)}),
+  updateUser:(id:number,input:AdminUserInput & {is_active:boolean;expected_session_version:number})=>request<AdminUser>(`/api/admin/users/${id}`,{method:'PUT',body:JSON.stringify(input)}),
+  resetPin:(id:number,pin:string,expected_session_version:number)=>request<AdminUser>(`/api/admin/users/${id}/reset-pin`,{method:'POST',body:JSON.stringify({pin,expected_session_version})}),
+  adminAudit:(offset=0)=>request<AdminAudit[]>(`/api/admin/audit?offset=${offset}&limit=50`),
   login:(login:string,pin:string)=>request<AuthSession>('/api/auth/login',{method:'POST',body:JSON.stringify({login,pin})}),
   me:(signal?:AbortSignal)=>request<CurrentUser>('/api/auth/me',{signal}),
   health:()=>request<{status:string}>('/api/health'),

@@ -60,7 +60,7 @@ const displayedLanes = computed(() => $q.screen.lt.md ? masterLanes.value.filter
             </article>
           </div>
         </div>
-        <div class="section-heading"><div><h2>Наряды смены</h2><span>{{ visibleOrders.length }} записей</span></div><div class="ai-state"><span :class="{ active: aiAvailable }"/><q-icon name="neurology"/> {{ aiAvailable ? 'Локальная AI активна' : 'Резервный режим' }}</div></div>
+        <div class="section-heading"><div><h2>Наряды смены</h2><span>{{ visibleOrders.length }} записей</span></div><div class="ai-state"><span :class="{ active: aiAvailable }"/><q-icon name="psychology"/> {{ aiAvailable ? 'Локальная AI активна' : 'Резервный режим' }}</div></div>
         <div class="board-filters">
           <q-select v-model="filters.siteId" dense outlined clearable emit-value map-options label="Участок" :options="directories?.sites.map(site => ({ label: site.name, value: site.id })) ?? []" />
           <q-select v-model="filters.equipmentId" dense outlined clearable emit-value map-options label="Оборудование" :options="directories?.equipment.filter(item => filters.siteId === null || item.site_id === filters.siteId).map(item => ({ label: item.name, value: item.id })) ?? []" />
@@ -76,7 +76,7 @@ const displayedLanes = computed(() => $q.screen.lt.md ? masterLanes.value.filter
               <OrderCard v-for="order in lane.orders" :key="order.id" compact :order="order" :equipment="name(directories?.equipment,order.equipment_id)" :assignee="name(directories?.users,order.assignee_id)" :status-label="statusMeta[order.status].label" :status-color="statusMeta[order.status].color" :overdue="isOverdue(order)" :review="reviewFor(order.id)">
                 <template #actions>
                   <q-btn flat no-caps icon="description" label="Отчёт" @click="emit('report', order)" />
-                  <q-btn v-if="order.status==='completed'" unelevated no-caps color="purple" icon="neurology" label="Запустить проверку" class="full-width" :loading="reviewPending" :disable="offline" @click="emit('review', order.id)" />
+                  <q-btn v-if="order.status==='completed'" unelevated no-caps color="purple" icon="psychology" label="Запустить проверку" class="full-width" :loading="reviewPending" :disable="offline" @click="emit('review', order.id)" />
                   <template v-if="['completed','ai_review'].includes(order.status)"><q-btn outline no-caps color="negative" label="На доработку" class="col" :disable="offline || decisionPending" @click="emit('decision', order, 'rework')"/><q-btn unelevated no-caps color="positive" label="Принять" class="col" :disable="offline || decisionPending" @click="emit('decision', order, 'closed')"/></template>
                 </template>
               </OrderCard>

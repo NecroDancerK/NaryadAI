@@ -17,7 +17,7 @@ defineProps<{ order: WorkOrder; equipment: string; assignee?: string; statusLabe
       <div :class="{ 'deadline-overdue': overdue }"><q-icon name="schedule" />до {{ date.formatDate(order.due_at, 'DD.MM, HH:mm') }}</div>
     </div>
     <div v-if="review" class="ai-result">
-      <div class="ai-heading"><span><q-icon name="neurology" /> AI-проверка</span><b>{{ review.score }}/100</b></div>
+      <div class="ai-heading"><span><q-icon name="psychology" /> AI-проверка</span><b>{{ review.score }}/100</b></div>
       <p>{{ review.explanation }}</p>
       <div class="ai-meta">{{ review.analysis_source === 'local_llm' ? review.model_name : 'Резервные правила' }} · уверенность {{ Math.round(review.confidence * 100) }}%</div>
     </div>
@@ -30,5 +30,9 @@ defineProps<{ order: WorkOrder; equipment: string; assignee?: string; statusLabe
 </style>
 <style scoped>
 .card-actions{flex-wrap:wrap}.card-actions :deep(.q-btn){min-width:0}
+.order-top>div{min-width:0}.equipment,.description,.ai-result p,.ai-meta{overflow-wrap:anywhere}
+.status-badge{flex-shrink:0;max-width:50%;white-space:normal;text-align:center}
+.order-meta .q-icon{flex:0 0 auto;font-size:16px}
+.ai-heading span{display:flex;align-items:center;gap:5px}.ai-heading .q-icon{margin-right:0;flex-shrink:0}
 @media(max-width:599px){.card-actions :deep(.q-btn){flex:1 1 45%;min-height:48px}}
 </style>

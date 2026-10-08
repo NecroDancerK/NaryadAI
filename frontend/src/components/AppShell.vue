@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import type { CurrentUser } from '../api'
 import ThemeSelector from './ThemeSelector.vue'
+import { roleLabels, type AppView } from '../utils/roles'
 
-const props = defineProps<{ user: CurrentUser; view: 'master' | 'worker' | 'reports'; online: boolean; unread: number; pending: number }>()
-const emit = defineEmits<{ 'update:view': [view: 'master' | 'worker' | 'reports']; logout: [] }>()
+const props = defineProps<{ user: CurrentUser; view: AppView; online: boolean; unread: number; pending: number }>()
+const emit = defineEmits<{ 'update:view': [view: AppView]; logout: [] }>()
 
 const navigation = [
   { name: 'master' as const, label: 'Диспетчерская', icon: 'space_dashboard', roles: ['master', 'admin'] },
   { name: 'worker' as const, label: 'Мои наряды', icon: 'engineering', roles: ['worker'] },
   { name: 'reports' as const, label: 'Аналитика', icon: 'bar_chart', roles: ['master', 'manager', 'admin'] },
+  { name: 'admin' as const, label: 'Администрирование', icon: 'manage_accounts', roles: ['admin'] },
 ]
 </script>
 
@@ -24,9 +26,9 @@ const navigation = [
         <slot name="notifications" />
         <div class="user-summary">
           <q-avatar color="green-1" text-color="primary" icon="person" size="38px" />
-          <div><div class="user-name">{{ user.full_name }}</div><div class="user-role">{{ user.specialty ?? (user.role === 'master' ? 'Мастер смены' : 'Руководитель') }}</div></div>
+          <div><div class="user-name">{{ user.full_name }}</div><div class="user-role">{{ roleLabels[user.role] }}</div></div>
         </div>
-        <q-btn flat round icon="logout" color="grey-7" title="Выйти" @click="emit('logout')" />
+        <q-btn flat round icon="logout" color="grey-7" title="Выйти" aria-label="Выйти" @click="emit('logout')" />
       </q-toolbar>
     </q-header>
 
@@ -44,7 +46,7 @@ const navigation = [
     <q-page-container><slot /></q-page-container>
 
     <q-footer v-if="$q.screen.lt.md" class="mobile-nav">
-      <button v-for="item in navigation.filter(item => item.roles.includes(user.role))" :key="item.name" :class="{ active: props.view === item.name }" @click="emit('update:view', item.name)"><q-icon :name="item.icon" /><span>{{ item.label }}</span></button>
+      <button v-for="item in navigation.filter(item => item.roles.includes(user.role))" :key="item.name" type="button" :aria-current="props.view === item.name ? 'page' : undefined" :class="{ active: props.view === item.name }" @click="emit('update:view', item.name)"><q-icon :name="item.icon" /><span>{{ item.label }}</span></button>
     </q-footer>
   </q-layout>
 </template>
@@ -57,4 +59,13 @@ const navigation = [
 .app-layout :deep(.q-drawer__content.sidebar){background:#0e2921;color:#d8e7e0}
 .mobile-nav button{color:var(--app-muted)}
 .mobile-nav button.active{color:var(--app-accent)}
+.nav-list :deep(.q-item__section--avatar){flex:0 0 40px;min-width:40px;padding-right:12px;align-items:center}
+.nav-list :deep(.q-item__section--avatar .q-icon){font-size:24px;width:24px;height:24px}
+.nav-list :deep(.q-item__section--main){min-width:0;overflow-wrap:anywhere}
+.sidebar-logo,.sidebar-footer>.q-icon{flex-shrink:0}
+.mobile-nav button{min-width:0;min-height:48px;border-radius:8px}
+.mobile-nav button span{max-width:100%;overflow-wrap:anywhere;line-height:1.25}
+.mobile-nav button:focus-visible{outline:2px solid var(--app-accent);outline-offset:-2px}
+@media(max-width:599px){.topbar-inner{padding:0 8px;gap:2px}.mobile-logo{display:flex;align-items:center;gap:4px;white-space:nowrap;font-size:16px}.mobile-logo .q-icon{margin:0;flex-shrink:0}.mobile-pending{margin-left:3px}.user-summary{margin:0 3px}.user-summary .q-avatar{width:30px;height:30px;font-size:30px}}
+@media(max-width:359px){.user-summary{display:none}}
 </style>

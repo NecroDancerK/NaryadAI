@@ -14,6 +14,8 @@ import CompletionDialog from './components/CompletionDialog.vue'
 import WorkOrderReportDialog from './components/WorkOrderReportDialog.vue'
 import ReportsView from './components/ReportsView.vue'
 import PwaStatus from './components/PwaStatus.vue'
+import AdminUsersView from './components/AdminUsersView.vue'
+import { initialView, type AppView } from './utils/roles'
 import { recoverSession } from './utils/sessionRecovery'
 
 const $q = useQuasar()
@@ -26,7 +28,7 @@ const reportOpen = ref(false)
 const restoringSession = ref(false)
 const sessionNotice = ref('')
 const currentUser = ref<CurrentUser | null>(null)
-const role = ref<'master' | 'worker' | 'reports'>('master')
+const role = ref<AppView>('master')
 const authenticated = computed(() => currentUser.value !== null)
 const realtimeConnected = ref(false)
 const browserOnline = ref(navigator.onLine)
@@ -61,7 +63,7 @@ const workerOrders = computed(() => displayOrders.value.filter(order => order.as
 
 const login = useMutation({
   mutationFn: (credentials: { login: string; pin: string }) => api.login(credentials.login, credentials.pin),
-  onSuccess: async session => { setAccessToken(session.access_token); currentUser.value = session.user; role.value = session.user.role === 'worker' ? 'worker' : session.user.role === 'manager' ? 'reports' : 'master'; await syncOffline(); queryClient.invalidateQueries(); connectRealtime() },
+  onSuccess: async session => { setAccessToken(session.access_token); currentUser.value = session.user; role.value = initialView(session.user.role); await syncOffline(); queryClient.invalidateQueries(); connectRealtime() },
   onError: error => $q.notify({ type: 'negative', message: error.message }),
 })
 function logout(message?: string) {
@@ -183,7 +185,7 @@ function connectRealtime() {
   socket = new WebSocket(wsUrl())
   socket.onopen = () => { realtimeConnected.value = true; void syncOffline() }
   socket.onmessage = () => { queryClient.invalidateQueries({ queryKey: ['work-orders'] }); queryClient.invalidateQueries({ queryKey: ['ai-reviews'] }); queryClient.invalidateQueries({queryKey:['notifications']}) }
-  socket.onclose = () => { realtimeConnected.value = false; socket = undefined; if (currentUser.value) window.setTimeout(connectRealtime, 2000) }
+  socket.onclose = event => { realtimeConnected.value = false; socket = undefined; if (event.code===4401) { logout('Сессия отозвана или истекла. Войдите заново.'); return } if (currentUser.value) window.setTimeout(connectRealtime, 2000) }
 }
 async function refreshOffline(userId: number) {
   const list = await queuedActions(userId)
@@ -239,7 +241,7 @@ async function restoreSession() {
     if (result.state !== 'confirmed') return
     sessionNotice.value = ''
     currentUser.value = result.user
-    role.value = currentUser.value.role === 'worker' ? 'worker' : currentUser.value.role === 'manager' ? 'reports' : 'master'
+    role.value = initialView(currentUser.value.role)
     await syncOffline()
     connectRealtime()
   } finally { restoringSession.value = false }
@@ -264,6 +266,7 @@ onBeforeUnmount(() => { window.clearInterval(syncTimer); if (socket) { socket.on
       <OfflineQueuePanel :actions="offlineActions" :syncing="syncingOffline" :online="browserOnline" @sync="syncOffline" @retry="retryOffline" />
       <MasterDashboard v-if="role==='master'" :orders="displayOrders" :directories="directories.data.value" :workers="shiftWorkers.data.value ?? []" :reviews="reviews.data.value ?? []" :loading="orders.isPending.value" :error="orders.error.value?.message" :offline="!browserOnline" :workers-loading="shiftWorkers.isPending.value" :workers-error="shiftWorkers.error.value?.message" :ai-available="aiStatus.data.value?.available ?? false" :review-pending="runReview.isPending.value" :decision-pending="transition.isPending.value" @create="createOpen=true" @report="showOrderReport" @review="runReview.mutate" @decision="masterDecision" @retry="orders.refetch()" @retry-workers="shiftWorkers.refetch()" />
       <WorkerDashboard v-else-if="role==='worker'" :orders="workerOrders" :directories="directories.data.value" :reviews="reviews.data.value ?? []" :loading="orders.isPending.value" :error="orders.error.value?.message" :offline="!browserOnline" :pending="transition.isPending.value" @action="handleAction" @report="showOrderReport" @retry="orders.refetch()" />
+      <AdminUsersView v-else-if="role==='admin' && currentUser.role==='admin'" :user="currentUser" :online="browserOnline && health.isSuccess.value" @session-revoked="logout('PIN изменён. Войдите с новым PIN.')" />
       <template v-else>
         <ReportsView :shift="shiftReport.data.value" :workers="ratings.data.value?.workers" :history="historyAnalytics.data.value"/>
       </template>

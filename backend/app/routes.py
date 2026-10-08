@@ -48,7 +48,7 @@ async def accessible_order(order_id: int, user: User, session: AsyncSession, for
 @router.post("/auth/login", response_model=AuthToken, tags=["auth"])
 async def login(payload: AuthLogin, session: AsyncSession = Depends(get_session)):
     user = await session.scalar(select(User).where(func.lower(User.login) == payload.login.strip().lower()))
-    if not user or not verify_pin(payload.pin, user.pin_hash):
+    if not user or not user.is_active or not verify_pin(payload.pin, user.pin_hash):
         raise HTTPException(status_code=401, detail="Неверный логин или PIN-код")
     return AuthToken(access_token=create_access_token(user), user=CurrentUserRead.model_validate(user))
 
@@ -74,8 +74,8 @@ async def list_work_orders(user: User = Depends(current_user), session: AsyncSes
 async def persist_work_order(payload: WorkOrderCreate, master: User, session: AsyncSession, photos: list[tuple[UploadFile, ValidatedPhoto]] | None = None) -> WorkOrder:
     if payload.due_at <= datetime.now(UTC):
         raise HTTPException(status_code=422, detail="Срок исполнения должен быть в будущем")
-    assignee = await session.get(User, payload.assignee_id)
-    if not assignee or assignee.role != UserRole.WORKER:
+    assignee = await session.scalar(select(User).where(User.id == payload.assignee_id).with_for_update())
+    if not assignee or not assignee.is_active or assignee.role != UserRole.WORKER:
         raise HTTPException(status_code=422, detail="Исполнитель не найден")
     equipment = await session.get(Equipment, payload.equipment_id)
     if not equipment or equipment.site_id != payload.site_id:
@@ -462,7 +462,7 @@ async def complete_work_order(
 
 @router.get("/directories", tags=["directories"])
 async def directories(_: User = Depends(current_user), session: AsyncSession = Depends(get_session)):
-    users = (await session.scalars(select(User).order_by(User.id))).all()
+    users = (await session.scalars(select(User).where(User.is_active.is_(True)).order_by(User.id))).all()
     equipment = (await session.scalars(select(Equipment).order_by(Equipment.id))).all()
     sites = (await session.scalars(select(Site).order_by(Site.id))).all()
     fault_codes = (await session.scalars(select(FaultCode).order_by(FaultCode.code))).all()
@@ -481,7 +481,7 @@ async def shift_workers(
     _: User = Depends(require_roles(UserRole.MASTER, UserRole.ADMIN)),
     session: AsyncSession = Depends(get_session),
 ):
-    workers = list((await session.scalars(select(User).where(User.role == UserRole.WORKER).order_by(User.full_name))).all())
+    workers = list((await session.scalars(select(User).where(User.role == UserRole.WORKER, User.is_active.is_(True)).order_by(User.full_name))).all())
     if not workers:
         return []
 
