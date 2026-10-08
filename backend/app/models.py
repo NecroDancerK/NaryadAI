@@ -2,7 +2,7 @@ from datetime import datetime
 
 from decimal import Decimal
 
-from sqlalchemy import JSON, Boolean, DateTime, Enum, ForeignKey, Numeric, String, Text, func
+from sqlalchemy import JSON, Boolean, DateTime, Enum, ForeignKey, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -69,6 +69,17 @@ class WorkOrderEvent(Base):
     work_order: Mapped[WorkOrder] = relationship(back_populates="events")
 
 
+class IdempotentAction(Base):
+    __tablename__ = "idempotent_actions"
+    __table_args__ = (UniqueConstraint("actor_id", "key", name="uq_idempotent_actor_key"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    actor_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    key: Mapped[str] = mapped_column(String(36))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    response_body: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class FaultCode(Base):
     __tablename__ = "fault_codes"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -86,7 +97,7 @@ class Material(Base):
 class WorkOrderCompletion(Base):
     __tablename__ = "work_order_completions"
     id: Mapped[int] = mapped_column(primary_key=True)
-    work_order_id: Mapped[int] = mapped_column(ForeignKey("work_orders.id", ondelete="CASCADE"), unique=True)
+    work_order_id: Mapped[int] = mapped_column(ForeignKey("work_orders.id", ondelete="CASCADE"), index=True)
     fault_code_id: Mapped[int] = mapped_column(ForeignKey("fault_codes.id"))
     work_performed: Mapped[str] = mapped_column(Text)
     comment: Mapped[str | None] = mapped_column(Text)
@@ -106,6 +117,7 @@ class WorkOrderPhoto(Base):
     __tablename__ = "work_order_photos"
     id: Mapped[int] = mapped_column(primary_key=True)
     work_order_id: Mapped[int] = mapped_column(ForeignKey("work_orders.id", ondelete="CASCADE"))
+    completion_id: Mapped[int | None] = mapped_column(ForeignKey("work_order_completions.id", ondelete="CASCADE"), index=True)
     photo_type: Mapped[str] = mapped_column(String(20))
     file_path: Mapped[str] = mapped_column(String(500))
     original_name: Mapped[str | None] = mapped_column(String(255))
@@ -117,7 +129,8 @@ class WorkOrderPhoto(Base):
 class AiInspection(Base):
     __tablename__ = "ai_inspections"
     id: Mapped[int] = mapped_column(primary_key=True)
-    work_order_id: Mapped[int] = mapped_column(ForeignKey("work_orders.id", ondelete="CASCADE"), unique=True)
+    work_order_id: Mapped[int] = mapped_column(ForeignKey("work_orders.id", ondelete="CASCADE"), index=True)
+    completion_id: Mapped[int | None] = mapped_column(ForeignKey("work_order_completions.id", ondelete="CASCADE"), unique=True)
     verdict: Mapped[AiVerdict] = mapped_column(Enum(AiVerdict, name="ai_verdict", values_callable=enum_values))
     score: Mapped[int]
     confidence: Mapped[Decimal] = mapped_column(Numeric(4, 3))
@@ -127,6 +140,21 @@ class AiInspection(Base):
     model_name: Mapped[str | None] = mapped_column(String(200))
     llm_error: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PhotoObservation(Base):
+    __tablename__ = "photo_observations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    completion_id: Mapped[int] = mapped_column(ForeignKey("work_order_completions.id", ondelete="CASCADE"), unique=True)
+    status: Mapped[str] = mapped_column(String(20))
+    attempt: Mapped[str] = mapped_column(String(36))
+    model_name: Mapped[str] = mapped_column(String(200))
+    prompt_version: Mapped[str] = mapped_column(String(40))
+    photo_ids: Mapped[list[int]] = mapped_column(JSON)
+    result: Mapped[dict | None] = mapped_column(JSON)
+    error: Mapped[str | None] = mapped_column(String(300))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Notification(Base):

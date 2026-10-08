@@ -1,16 +1,20 @@
 import json
+import hashlib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
+from app.config import settings
+from app.idempotency import commit_action, replay, request_hash
+from app.photos import MAX_BATCH_BYTES, ValidatedPhoto, decode_photo, read_photo
 from app.domain import UserRole, WorkOrderStatus, can_transition
 from app.auth import create_access_token, current_user, require_roles, verify_pin
 from app.inspection import inspect_order
@@ -19,7 +23,7 @@ from app.demo_data import generate_demo_history
 from app.history_analytics import analyze_history
 from app.llm import llm_status, semantic_review
 from app.deadlines import check_deadlines
-from app.models import AiInspection, Equipment, FaultCode, Material, MaterialUsage, Notification, Site, User, WorkOrder, WorkOrderCompletion, WorkOrderEvent, WorkOrderPhoto
+from app.models import AiInspection, Equipment, FaultCode, Material, MaterialUsage, Notification, PhotoObservation, Site, User, WorkOrder, WorkOrderCompletion, WorkOrderEvent, WorkOrderPhoto
 from app.schemas import AuthLogin, AuthToken, AiInspectionRead, CurrentUserRead, NotificationRead, WorkOrderCreate, WorkOrderEventRead, WorkOrderRead, WorkOrderTransition
 from app.realtime import manager
 
@@ -67,7 +71,7 @@ async def list_work_orders(user: User = Depends(current_user), session: AsyncSes
     return (await session.scalars(query.order_by(WorkOrder.created_at.desc()).limit(200))).all()
 
 
-async def persist_work_order(payload: WorkOrderCreate, master: User, session: AsyncSession, photos: list[tuple[UploadFile, bytes]] | None = None) -> WorkOrder:
+async def persist_work_order(payload: WorkOrderCreate, master: User, session: AsyncSession, photos: list[tuple[UploadFile, ValidatedPhoto]] | None = None) -> WorkOrder:
     if payload.due_at <= datetime.now(UTC):
         raise HTTPException(status_code=422, detail="Срок исполнения должен быть в будущем")
     assignee = await session.get(User, payload.assignee_id)
@@ -84,13 +88,12 @@ async def persist_work_order(payload: WorkOrderCreate, master: User, session: As
     session.add(WorkOrderEvent(work_order_id=order.id, actor_id=master.id, from_status=None, to_status=WorkOrderStatus.ISSUED, comment="Наряд выдан"))
     saved_paths: list[Path] = []
     try:
-        for photo, data in photos or []:
-            suffix = Path(photo.filename or "photo.jpg").suffix.lower()[:10] or ".jpg"
+        for photo, checked in photos or []:
             STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-            photo_path = STORAGE_DIR / f"{order.id}-{uuid4().hex}{suffix}"
-            photo_path.write_bytes(data)
+            photo_path = STORAGE_DIR / f"{order.id}-{uuid4().hex}{checked.suffix}"
+            photo_path.write_bytes(checked.data)
             saved_paths.append(photo_path)
-            session.add(WorkOrderPhoto(work_order_id=order.id, photo_type="before", file_path=str(photo_path), original_name=photo.filename, content_type=photo.content_type or "application/octet-stream", uploaded_by=master.id))
+            session.add(WorkOrderPhoto(work_order_id=order.id, photo_type="before", file_path=str(photo_path), original_name=photo.filename, content_type=checked.content_type, uploaded_by=master.id))
         await session.commit()
     except Exception:
         await session.rollback()
@@ -121,20 +124,20 @@ async def create_work_order_with_photos(
     if len(photos) > 5:
         raise HTTPException(status_code=422, detail="Можно приложить не более 5 фотографий")
 
-    photo_data: list[tuple[UploadFile, bytes]] = []
+    photo_data: list[tuple[UploadFile, ValidatedPhoto]] = []
+    total_bytes = 0
     for photo in photos:
-        if not photo.content_type or not photo.content_type.startswith("image/"):
-            raise HTTPException(status_code=422, detail="Допускаются только изображения")
-        data = await photo.read(10 * 1024 * 1024 + 1)
-        if len(data) > 10 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="Фото превышает 10 МБ")
-        photo_data.append((photo, data))
+        data = await read_photo(photo)
+        total_bytes += len(data)
+        if total_bytes > MAX_BATCH_BYTES:
+            raise HTTPException(413, 'Общий размер фотографий превышает 25 МиБ')
+        photo_data.append((photo, await decode_photo(data, photo.content_type)))
 
     return await persist_work_order(work_order, master, session, photo_data)
 
 
 @router.post("/work-orders/{order_id}/transitions", response_model=WorkOrderRead, tags=["work orders"])
-async def transition_work_order(order_id: int, payload: WorkOrderTransition, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)):
+async def transition_work_order(order_id: int, payload: WorkOrderTransition, user: User = Depends(current_user), session: AsyncSession = Depends(get_session), idempotency_key: str | None = Header(None, max_length=36)):
     order = await accessible_order(order_id, user, session, for_update=True)
     worker_targets = {WorkOrderStatus.ACCEPTED, WorkOrderStatus.QUEUED, WorkOrderStatus.REJECTED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.PAUSED}
     master_targets = {WorkOrderStatus.ISSUED, WorkOrderStatus.REWORK, WorkOrderStatus.CLOSED}
@@ -144,17 +147,20 @@ async def transition_work_order(order_id: int, payload: WorkOrderTransition, use
         raise HTTPException(status_code=403, detail="Переход недоступен мастеру")
     if user.role == UserRole.MANAGER:
         raise HTTPException(status_code=403, detail="Руководителю доступен только просмотр")
+    fingerprint = request_hash("transition", order_id, payload.model_dump(mode="json"))
+    previous_response = await replay(session, user.id, idempotency_key, fingerprint)
+    if previous_response is not None:
+        return previous_response
     if not can_transition(order.status, payload.status):
         raise HTTPException(status_code=409, detail=f"Переход {order.status.value} → {payload.status.value} запрещён")
-    if payload.status in {WorkOrderStatus.REJECTED, WorkOrderStatus.PAUSED} and not payload.comment:
-        raise HTTPException(status_code=422, detail="Для отклонения или приостановки требуется причина")
+    if payload.status in {WorkOrderStatus.REJECTED, WorkOrderStatus.PAUSED, WorkOrderStatus.REWORK} and not (payload.comment or "").strip():
+        raise HTTPException(status_code=422, detail="Для отклонения, приостановки или доработки требуется причина")
     previous = order.status
     order.status = payload.status
     session.add(WorkOrderEvent(work_order_id=order.id, actor_id=user.id, from_status=previous, to_status=payload.status, comment=payload.comment))
-    await session.commit()
-    await session.refresh(order)
+    response = await commit_action(session, order, user.id, idempotency_key, fingerprint)
     await manager.broadcast({"type": "work_order.status_changed", "work_order_id": order.id, "status": order.status.value})
-    return order
+    return response
 
 
 @router.get("/work-orders/{order_id}/events", response_model=list[WorkOrderEventRead], tags=["work orders"])
@@ -173,7 +179,10 @@ async def get_work_order_photo(order_id: int, photo_id: int, user: User = Depend
     ))
     if not photo or not Path(photo.file_path).is_file():
         raise HTTPException(status_code=404, detail="Фото не найдено")
-    return FileResponse(photo.file_path, media_type=photo.content_type)
+    media_type = {'image/jpg':'image/jpeg','image/pjpeg':'image/jpeg'}.get(photo.content_type, photo.content_type)
+    if media_type not in {'image/jpeg','image/png','image/webp'}:
+        raise HTTPException(415, 'Сохранённый формат фото не поддерживается. Загрузите JPEG, PNG или WebP')
+    return FileResponse(photo.file_path, media_type=media_type, headers={"X-Content-Type-Options":"nosniff"})
 
 
 @router.get("/work-orders/{order_id}/report", tags=["work orders"])
@@ -189,28 +198,32 @@ async def get_work_order_report(order_id: int, user: User = Depends(current_user
         .where(WorkOrderEvent.work_order_id == order.id)
         .order_by(WorkOrderEvent.created_at, WorkOrderEvent.id)
     )).all()
-    completion = await session.scalar(select(WorkOrderCompletion).where(WorkOrderCompletion.work_order_id == order.id))
-    inspection = await session.scalar(select(AiInspection).where(AiInspection.work_order_id == order.id))
+    completions = list((await session.scalars(select(WorkOrderCompletion).where(WorkOrderCompletion.work_order_id == order.id).order_by(WorkOrderCompletion.id))).all())
+    completion = completions[-1] if completions else None
+    inspection = await session.scalar(select(AiInspection).where(AiInspection.completion_id == completion.id)) if completion else None
     photos = (await session.scalars(
         select(WorkOrderPhoto).where(WorkOrderPhoto.work_order_id == order.id).order_by(WorkOrderPhoto.created_at, WorkOrderPhoto.id)
     )).all()
 
-    completion_data = None
-    if completion:
-        fault = await session.get(FaultCode, completion.fault_code_id)
+    completion_history = []
+    for submission in completions:
+        visual = await session.scalar(select(PhotoObservation).where(PhotoObservation.completion_id == submission.id))
+        fault = await session.get(FaultCode, submission.fault_code_id)
         material_rows = (await session.execute(
             select(MaterialUsage, Material)
             .join(Material, Material.id == MaterialUsage.material_id)
-            .where(MaterialUsage.completion_id == completion.id)
+            .where(MaterialUsage.completion_id == submission.id)
             .order_by(Material.name)
         )).all()
-        completion_data = {
-            "work_performed": completion.work_performed,
-            "comment": completion.comment,
-            "created_at": completion.created_at,
+        completion_history.append({
+            "id": submission.id,
+            "vision": {key: getattr(visual, key) for key in ("completion_id", "status", "model_name", "prompt_version", "photo_ids", "result", "error", "started_at", "finished_at")} if visual else None,
+            "work_performed": submission.work_performed,
+            "comment": submission.comment,
+            "created_at": submission.created_at,
             "fault_code": {"code": fault.code, "name": fault.name} if fault else None,
             "materials": [{"name": material.name, "quantity": usage.quantity, "unit": material.unit} for usage, material in material_rows],
-        }
+        })
 
     return {
         "order": {
@@ -235,7 +248,9 @@ async def get_work_order_report(order_id: int, user: User = Depends(current_user
             "comment": event.comment,
             "created_at": event.created_at,
         } for event, actor_name in event_rows],
-        "completion": completion_data,
+        "completion": completion_history[-1] if completion_history else None,
+        "completions": completion_history,
+        "vision_enabled": settings.vlm_enabled,
         "inspection": {
             "verdict": inspection.verdict.value,
             "score": inspection.score,
@@ -249,6 +264,7 @@ async def get_work_order_report(order_id: int, user: User = Depends(current_user
         "photos": [{
             "id": photo.id,
             "photo_type": photo.photo_type,
+            "completion_id": photo.completion_id,
             "original_name": photo.original_name,
             "created_at": photo.created_at,
         } for photo in photos],
@@ -258,23 +274,23 @@ async def get_work_order_report(order_id: int, user: User = Depends(current_user
 @router.post("/work-orders/{order_id}/ai-review", response_model=AiInspectionRead, tags=["AI inspection"])
 async def run_ai_review(order_id: int, master: User = Depends(require_roles(UserRole.MASTER, UserRole.ADMIN)), session: AsyncSession = Depends(get_session)):
     order = await accessible_order(order_id, master, session, for_update=True)
-    existing = await session.scalar(select(AiInspection).where(AiInspection.work_order_id == order_id))
+    completion = await session.scalar(select(WorkOrderCompletion).where(WorkOrderCompletion.work_order_id == order_id).order_by(WorkOrderCompletion.id.desc()).limit(1))
+    existing = await session.scalar(select(AiInspection).where(AiInspection.completion_id == completion.id)) if completion else None
     if existing:
         return existing
     if order.status != WorkOrderStatus.COMPLETED:
         raise HTTPException(status_code=409, detail="Проверить можно только исполненный наряд")
-    completion = await session.scalar(select(WorkOrderCompletion).where(WorkOrderCompletion.work_order_id == order_id))
     if not completion:
         raise HTTPException(status_code=409, detail="Данные закрытия отсутствуют")
     usages = list((await session.scalars(select(MaterialUsage).where(MaterialUsage.completion_id == completion.id))).all())
-    photo_count = await session.scalar(select(func.count(WorkOrderPhoto.id)).where(WorkOrderPhoto.work_order_id == order_id, WorkOrderPhoto.photo_type == "after")) or 0
+    photo_count = await session.scalar(select(func.count(WorkOrderPhoto.id)).where(WorkOrderPhoto.completion_id == completion.id, WorkOrderPhoto.photo_type == "after")) or 0
     fault = await session.get(FaultCode, completion.fault_code_id)
     material_ids = {usage.material_id for usage in usages}
     material_map = {item.id: item for item in (await session.scalars(select(Material).where(Material.id.in_(material_ids)))).all()} if material_ids else {}
     material_labels = [f"{material_map[usage.material_id].name}: {usage.quantity} {material_map[usage.material_id].unit}" for usage in usages if usage.material_id in material_map]
     llm_result = await semantic_review(order.description, completion.work_performed, f"{fault.code} — {fault.name}" if fault else "не указан", material_labels)
     verdict, score, confidence, checks, explanation = inspect_order(order, completion, usages, photo_count, llm_result)
-    inspection = AiInspection(work_order_id=order.id, verdict=verdict, score=score, confidence=confidence, checks=checks, explanation=explanation, analysis_source=llm_result.source, model_name=llm_result.model, llm_error=llm_result.error)
+    inspection = AiInspection(work_order_id=order.id, completion_id=completion.id, verdict=verdict, score=score, confidence=confidence, checks=checks, explanation=explanation, analysis_source=llm_result.source, model_name=llm_result.model, llm_error=llm_result.error)
     session.add(inspection)
     order.status = WorkOrderStatus.AI_REVIEW
     session.add(WorkOrderEvent(work_order_id=order.id, actor_id=master.id, from_status=WorkOrderStatus.COMPLETED, to_status=WorkOrderStatus.AI_REVIEW, comment=f"Автоматическая проверка: {verdict}, {score}/100"))
@@ -287,12 +303,15 @@ async def run_ai_review(order_id: int, master: User = Depends(require_roles(User
 @router.get("/work-orders/{order_id}/ai-review", response_model=AiInspectionRead | None, tags=["AI inspection"])
 async def get_ai_review(order_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)):
     await accessible_order(order_id, user, session)
-    return await session.scalar(select(AiInspection).where(AiInspection.work_order_id == order_id))
+    latest = select(WorkOrderCompletion.id).where(WorkOrderCompletion.work_order_id == order_id).order_by(WorkOrderCompletion.id.desc()).limit(1).scalar_subquery()
+    return await session.scalar(select(AiInspection).where(AiInspection.completion_id == latest))
 
 
 @router.get("/ai-reviews", response_model=list[AiInspectionRead], tags=["AI inspection"])
 async def list_ai_reviews(user: User = Depends(current_user), session: AsyncSession = Depends(get_session)):
     query = select(AiInspection).join(WorkOrder, WorkOrder.id == AiInspection.work_order_id)
+    latest = select(func.max(WorkOrderCompletion.id)).group_by(WorkOrderCompletion.work_order_id)
+    query = query.where(AiInspection.completion_id.in_(latest))
     if user.role == UserRole.WORKER:
         query = query.where(WorkOrder.assignee_id == user.id)
     elif user.role == UserRole.MASTER:
@@ -372,12 +391,11 @@ async def complete_work_order(
     materials_json: str = Form("[]"),
     comment: str | None = Form(None, max_length=2000),
     photo: UploadFile | None = File(None),
+    idempotency_key: str | None = Header(None, max_length=36),
     user: User = Depends(require_roles(UserRole.WORKER, UserRole.ADMIN)),
     session: AsyncSession = Depends(get_session),
 ):
     order = await accessible_order(order_id, user, session, for_update=True)
-    if order.status != WorkOrderStatus.IN_PROGRESS:
-        raise HTTPException(status_code=409, detail="Закрыть можно только наряд в работе")
     if user.role != UserRole.ADMIN and user.id != order.assignee_id:
         raise HTTPException(status_code=403, detail="Закрыть наряд может только назначенный исполнитель")
     if not await session.get(FaultCode, fault_code_id):
@@ -392,7 +410,7 @@ async def complete_work_order(
         usages = [(int(item["material_id"]), Decimal(str(item["quantity"]))) for item in raw_materials]
     except (ValueError, TypeError, KeyError, InvalidOperation, json.JSONDecodeError):
         raise HTTPException(status_code=422, detail="Некорректный список материалов")
-    if any(quantity <= 0 for _, quantity in usages):
+    if any(not quantity.is_finite() or quantity <= 0 for _, quantity in usages):
         raise HTTPException(status_code=422, detail="Количество материала должно быть больше нуля")
     material_ids = {material_id for material_id, _ in usages}
     if material_ids:
@@ -403,34 +421,43 @@ async def complete_work_order(
     photo_data: bytes | None = None
     photo_path: Path | None = None
     if photo:
-        if not photo.content_type or not photo.content_type.startswith("image/"):
-            raise HTTPException(status_code=422, detail="Допускаются только изображения")
-        photo_data = await photo.read(10 * 1024 * 1024 + 1)
-        if len(photo_data) > 10 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="Фото превышает 10 МБ")
+        photo_data = await read_photo(photo)
+
+    fingerprint = request_hash("completion", order_id, {
+        "work_performed": work_performed, "fault_code_id": fault_code_id, "comment": comment,
+        "materials": materials_json,
+        "photo": {"filename": photo.filename, "content_type": photo.content_type,
+                  "sha256": hashlib.sha256(photo_data).hexdigest()} if photo_data is not None else None,
+    })
+    previous_response = await replay(session, user.id, idempotency_key, fingerprint)
+    if previous_response is not None:
+        return previous_response
+    if order.status != WorkOrderStatus.IN_PROGRESS:
+        raise HTTPException(status_code=409, detail="Закрыть можно только наряд в работе")
+
+    checked_photo = await decode_photo(photo_data, photo.content_type) if photo and photo_data is not None else None
 
     completion = WorkOrderCompletion(work_order_id=order.id, fault_code_id=fault_code_id, work_performed=work_performed, comment=comment, completed_by=user.id)
     session.add(completion)
     await session.flush()
     for material_id, quantity in usages:
         session.add(MaterialUsage(completion_id=completion.id, material_id=material_id, quantity=quantity))
-    if photo and photo_data is not None:
-        suffix = Path(photo.filename or "photo.jpg").suffix.lower()[:10] or ".jpg"
+    if photo and checked_photo is not None:
         STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-        photo_path = STORAGE_DIR / f"{order.id}-{uuid4().hex}{suffix}"
-        photo_path.write_bytes(photo_data)
-        session.add(WorkOrderPhoto(work_order_id=order.id, photo_type="after", file_path=str(photo_path), original_name=photo.filename, content_type=photo.content_type, uploaded_by=user.id))
+        photo_path = STORAGE_DIR / f"{order.id}-{uuid4().hex}{checked_photo.suffix}"
+        photo_path.write_bytes(checked_photo.data)
+        session.add(WorkOrderPhoto(work_order_id=order.id, completion_id=completion.id, photo_type="after", file_path=str(photo_path), original_name=photo.filename, content_type=checked_photo.content_type, uploaded_by=user.id))
     order.status = WorkOrderStatus.COMPLETED
     session.add(WorkOrderEvent(work_order_id=order.id, actor_id=user.id, from_status=WorkOrderStatus.IN_PROGRESS, to_status=WorkOrderStatus.COMPLETED, comment="Исполнитель отправил наряд на проверку"))
     try:
-        await session.commit()
+        response = await commit_action(session, order, user.id, idempotency_key, fingerprint)
     except Exception:
+        await session.rollback()
         if photo_path:
             photo_path.unlink(missing_ok=True)
         raise
-    await session.refresh(order)
     await manager.broadcast({"type": "work_order.completed", "work_order_id": order.id, "status": order.status.value})
-    return order
+    return response
 
 
 @router.get("/directories", tags=["directories"])

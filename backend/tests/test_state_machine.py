@@ -9,6 +9,9 @@ from app.domain import WorkOrderStatus, can_transition
     (WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.PAUSED),
     (WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.COMPLETED),
     (WorkOrderStatus.COMPLETED, WorkOrderStatus.AI_REVIEW),
+    (WorkOrderStatus.COMPLETED, WorkOrderStatus.REWORK),
+    (WorkOrderStatus.COMPLETED, WorkOrderStatus.CLOSED),
+    (WorkOrderStatus.REWORK, WorkOrderStatus.IN_PROGRESS),
     (WorkOrderStatus.AI_REVIEW, WorkOrderStatus.REWORK),
     (WorkOrderStatus.AI_REVIEW, WorkOrderStatus.CLOSED),
 ])

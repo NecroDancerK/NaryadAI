@@ -5,6 +5,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routes import router
+from app.vision_routes import router as vision_router
 from app.realtime import manager
 from app.deadlines import deadline_loop
 from app.auth import decode_access_token
@@ -30,6 +31,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(router)
+app.include_router(vision_router)
 
 
 @app.get("/api/health", tags=["system"])

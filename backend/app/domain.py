@@ -46,7 +46,7 @@ ALLOWED_TRANSITIONS: dict[WorkOrderStatus, frozenset[WorkOrderStatus]] = {
     WorkOrderStatus.REJECTED: frozenset({WorkOrderStatus.ISSUED}),
     WorkOrderStatus.IN_PROGRESS: frozenset({WorkOrderStatus.PAUSED, WorkOrderStatus.COMPLETED}),
     WorkOrderStatus.PAUSED: frozenset({WorkOrderStatus.IN_PROGRESS}),
-    WorkOrderStatus.COMPLETED: frozenset({WorkOrderStatus.AI_REVIEW}),
+    WorkOrderStatus.COMPLETED: frozenset({WorkOrderStatus.AI_REVIEW, WorkOrderStatus.REWORK, WorkOrderStatus.CLOSED}),
     WorkOrderStatus.AI_REVIEW: frozenset({WorkOrderStatus.REWORK, WorkOrderStatus.CLOSED}),
     WorkOrderStatus.REWORK: frozenset({WorkOrderStatus.IN_PROGRESS}),
     WorkOrderStatus.CLOSED: frozenset(),

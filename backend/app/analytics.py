@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, time
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain import UserRole, WorkOrderPriority, WorkOrderStatus
@@ -49,8 +49,9 @@ async def worker_ratings(session: AsyncSession, start: datetime, end: datetime) 
     workers = list((await session.scalars(select(User).where(User.role == UserRole.WORKER).order_by(User.full_name))).all())
     orders = list((await session.scalars(select(WorkOrder).where(WorkOrder.created_at >= start, WorkOrder.created_at <= end))).all())
     order_ids = [order.id for order in orders]
-    completions = list((await session.scalars(select(WorkOrderCompletion).where(WorkOrderCompletion.work_order_id.in_(order_ids)))).all()) if order_ids else []
-    inspections = list((await session.scalars(select(AiInspection).where(AiInspection.work_order_id.in_(order_ids)))).all()) if order_ids else []
+    latest = select(func.max(WorkOrderCompletion.id)).where(WorkOrderCompletion.work_order_id.in_(order_ids)).group_by(WorkOrderCompletion.work_order_id)
+    completions = list((await session.scalars(select(WorkOrderCompletion).where(WorkOrderCompletion.id.in_(latest)))).all()) if order_ids else []
+    inspections = list((await session.scalars(select(AiInspection).where(AiInspection.completion_id.in_(latest)))).all()) if order_ids else []
     events = list((await session.scalars(select(WorkOrderEvent).where(WorkOrderEvent.work_order_id.in_(order_ids)))).all()) if order_ids else []
     completion_by_order = {item.work_order_id: item for item in completions}
     inspection_by_order = {item.work_order_id: item for item in inspections}
