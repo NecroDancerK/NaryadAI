@@ -1,0 +1,62 @@
+:root {
+  color-scheme: light;
+  --app-page: #f2f5f3;
+  --app-surface: #fff;
+  --app-soft: #f8faf9;
+  --app-lane: #e9eeeb;
+  --app-border: #dfe7e3;
+  --app-text: #24332c;
+  --app-muted: #5f6e67;
+  --app-accent: #246b48;
+  --app-topbar: rgba(255,255,255,.94);
+  --app-purple-bg: #f0ebf8;
+  --app-purple-text: #563d75;
+  --app-red-bg: #fde8e6;
+  --app-red-text: #b93630;
+  --app-amber-bg: #fff2d9;
+  --app-amber-text: #986000;
+  --app-green-bg: #e4f4eb;
+  --app-green-text: #14814c;
+  --app-blue-bg: #e4edf8;
+  --app-blue-text: #306aa4;
+}
+:root:has(body.body--dark) { color-scheme: dark; }
+body.body--dark {
+  color-scheme: dark;
+  --q-dark: #1a2923;
+  --q-dark-page: #111c17;
+  --app-page: #111c17;
+  --app-surface: #1a2923;
+  --app-soft: #203129;
+  --app-lane: #16251e;
+  --app-border: #35483d;
+  --app-text: #e1ebe4;
+  --app-muted: #a5b8ac;
+  --app-accent: #8ad5a9;
+  --app-topbar: rgba(26,41,35,.96);
+  --app-purple-bg: #30283e;
+  --app-purple-text: #d0b7eb;
+  --app-red-bg: #422824;
+  --app-red-text: #ffa99d;
+  --app-amber-bg: #3a3020;
+  --app-amber-text: #efd18d;
+  --app-green-bg: #223d2e;
+  --app-green-text: #8ad5a9;
+  --app-blue-bg: #233346;
+  --app-blue-text: #a1c8f5;
+}
+body { background: var(--app-page); color: var(--app-text); }
+body.body--dark .text-grey-6,
+body.body--dark .text-grey-7 { color: var(--app-muted) !important; }
+body.body--dark .bg-green-1 { background: var(--app-green-bg) !important; }
+body.body--dark .bg-green-1.text-primary { color: var(--app-green-text) !important; }
+body.body--dark .bg-grey-4 { background: var(--app-soft) !important; }
+body.body--dark .text-dark { color: var(--app-text) !important; }
+body.body--dark .bg-red-1 { background: var(--app-red-bg) !important; color: var(--app-red-text) !important; }
+body.body--dark .bg-amber-1 { background: var(--app-amber-bg) !important; color: var(--app-amber-text) !important; }
+body.body--dark .text-primary:not(.q-btn):not(.q-badge) { color: var(--app-accent) !important; }
+body.body--dark .text-negative:not(.q-btn):not(.q-badge) { color: var(--app-red-text) !important; }
+body.body--dark .q-btn--outline.text-primary,
+body.body--dark .q-btn--flat.text-primary { color: var(--app-accent) !important; }
+body.body--dark .q-btn--outline.text-negative,
+body.body--dark .q-btn--flat.text-negative { color: var(--app-red-text) !important; }

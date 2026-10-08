@@ -4,10 +4,11 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vue-tsc -b && vite build",
+    "dev": "vite --config vite.config.ts",
+    "build": "vue-tsc -b && vite build --config vite.config.ts",
     "typecheck": "vue-tsc -b",
-    "preview": "vite preview"
+    "test": "node --test tests/*.test.mjs",
+    "preview": "vite preview --config vite.config.ts"
   },
   "dependencies": {
     "@quasar/extras": "^1.16.17",

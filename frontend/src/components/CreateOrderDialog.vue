@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { date } from 'quasar'
+import { date, useQuasar } from 'quasar'
 import type { Directories } from '../api'
 
 const props = defineProps<{ modelValue: boolean; directories?: Directories; loading: boolean }>()
@@ -8,6 +8,7 @@ const emit = defineEmits<{ 'update:modelValue': [value: boolean]; submit: [paylo
 
 const form = reactive({ description: '', work_type: 'unplanned', site_id: 1, equipment_id: 1, assignee_id: 2, priority: 'normal', due_at: '' })
 const photos = ref<File[]>([])
+const $q = useQuasar()
 const workers = computed(() => props.directories?.users.filter(user => user.role === 'worker') ?? [])
 const equipment = computed(() => props.directories?.equipment.filter(item => item.site_id === form.site_id) ?? [])
 
@@ -41,7 +42,7 @@ function submit() {
           <div class="row q-col-gutter-md"><q-select v-model="form.site_id" class="col-12 col-sm-6" outlined emit-value map-options label="Участок *" :options="directories?.sites" option-value="id" option-label="name"/><q-select v-model="form.equipment_id" class="col-12 col-sm-6" outlined emit-value map-options label="Оборудование *" :options="equipment" option-value="id" option-label="name"/></div>
           <q-select v-model="form.assignee_id" outlined emit-value map-options label="Исполнитель *" :options="workers" option-value="id" option-label="full_name"/>
           <q-input v-model="form.due_at" outlined type="datetime-local" label="Срок исполнения *"><template #prepend><q-icon name="event"/></template></q-input>
-          <q-file v-model="photos" outlined multiple accept="image/*" max-files="5" max-file-size="10485760" label="Фото неисправности, до 5"><template #prepend><q-icon name="photo_camera"/></template></q-file>
+          <q-file v-model="photos" outlined multiple accept="image/jpeg,image/png,image/webp" max-files="5" max-file-size="10485760" max-total-size="26214400" label="Фото неисправности, до 5" hint="JPEG, PNG, WebP; до 10 МиБ/фото, 25 МиБ суммарно и 24 Мп" @rejected="$q.notify({type:'warning',message:'Не удалось выбрать фото: нужен JPEG/PNG/WebP, до 5 файлов, 10 МиБ на фото и 25 МиБ суммарно'})"><template #prepend><q-icon name="photo_camera"/></template></q-file>
         </q-card-section>
         <q-card-actions align="right" class="dialog-actions"><q-btn flat no-caps label="Отмена" @click="emit('update:modelValue', false)"/><q-btn unelevated no-caps color="primary" type="submit" icon="send" label="Выдать наряд" :loading="loading"/></q-card-actions>
       </q-form>
@@ -50,5 +51,5 @@ function submit() {
 </template>
 
 <style scoped>
-.work-dialog{width:min(700px,96vw);border-radius:18px}.dialog-heading{display:flex;align-items:center;justify-content:space-between;padding:24px 26px 18px;border-bottom:1px solid #e7ece9}.dialog-eyebrow{text-transform:uppercase;letter-spacing:.13em;color:#3c8262;font-size:9px;font-weight:800;margin-bottom:5px}.dialog-body{padding:24px 26px}.dialog-actions{padding:16px 26px 22px;border-top:1px solid #eef1ef}.dialog-actions .q-btn{min-width:130px;border-radius:10px}
+.work-dialog{width:min(700px,96vw);border-radius:18px}.dialog-heading{display:flex;align-items:center;justify-content:space-between;padding:24px 26px 18px;border-bottom:1px solid var(--app-border)}.dialog-eyebrow{text-transform:uppercase;letter-spacing:.13em;color:var(--app-accent);font-size:9px;font-weight:800;margin-bottom:5px}.dialog-body{padding:24px 26px}.dialog-actions{padding:16px 26px 22px;border-top:1px solid var(--app-border)}.dialog-actions .q-btn{min-width:130px;border-radius:10px}
 </style>
