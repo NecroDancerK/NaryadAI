@@ -1,4 +1,6 @@
 .env
+.env.https
+.local-certs/
 .idea/
 .vscode/
 __pycache__/
@@ -10,4 +12,6 @@ frontend/node_modules/
 frontend/dist/
 backend/.coverage
 storage/
-
+.local-models/
+*.tsbuildinfo
+.history-backups/

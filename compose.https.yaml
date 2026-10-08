@@ -1,0 +1,51 @@
+# Standalone demo: do not merge with compose.yaml. No production data or AI.
+name: naryadai-phone
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: naryad_phone
+      POSTGRES_USER: naryad_phone
+      POSTGRES_PASSWORD: ${PHONE_DB_PASSWORD:?Set PHONE_DB_PASSWORD in .env.https}
+    volumes:
+      - phone_database:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U naryad_phone -d naryad_phone"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log --log-level warning"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://naryad_phone:${PHONE_DB_PASSWORD:?Set PHONE_DB_PASSWORD}@postgres:5432/naryad_phone
+      JWT_SECRET: ${PHONE_JWT_SECRET:?Set PHONE_JWT_SECRET in .env.https}
+      LLM_ENABLED: "false"
+      VLM_ENABLED: "false"
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - phone_photos:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.https
+    ports:
+      - "${PHONE_BIND_IP:-127.0.0.1}:${PHONE_HTTPS_PORT:-8443}:443"
+    volumes:
+      - type: bind
+        source: ${HTTPS_CERT_DIR:?Set absolute HTTPS_CERT_DIR in .env.https}
+        target: /etc/naryad-tls
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      - backend
+
+volumes:
+  phone_database:
+  phone_photos:
